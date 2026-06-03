@@ -17,6 +17,13 @@ outputs/
 runs/
 wandb/
 
+# Large local assets
+/Data/
+/Model/
+/data/
+/models/
+/checkpoints/
+
 # System/editor files
 .DS_Store
 .vscode/
