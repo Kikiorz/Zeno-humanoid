@@ -1,0 +1,4 @@
+[submodule "third_party/lerobot"]
+	path = third_party/lerobot
+	url = git@github.com:Kikiorz/lerobot.git
+	branch = zeno-main
