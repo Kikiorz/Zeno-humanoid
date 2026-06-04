@@ -10,6 +10,8 @@ __pycache__/
 .venv/
 venv/
 env/
+/.hf_home/
+/.hf_lerobot/
 
 # Logs and local outputs
 *.log
