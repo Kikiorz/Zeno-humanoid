@@ -11,31 +11,37 @@ Default conversion:
     /zeno/h1/sensor/right_arm_cam/image/compressed
   State:
     /zeno/h1/sensor/odom_raw
+    /zeno/h1/wheelarm/torso/joint_state
     /zeno/h1/wheelarm/left_arm/joint_state
     /zeno/h1/left_gripper/joint_state
     /zeno/h1/wheelarm/right_arm/joint_state
     /zeno/h1/right_gripper/joint_state
   Action:
     /zeno/h1/sensor/odom_raw
+    /zeno/h1/wheelarm/torso/joint_cmd
     /zeno/h1/wheelarm/left_arm/joint_cmd
     /zeno/h1/left_gripper/joint_cmd
     /zeno/h1/wheelarm/right_arm/joint_cmd
     /zeno/h1/right_gripper/joint_cmd
 
-The default state/action is 19D:
-    [base_vx, base_vy, base_omega,
-     left_arm_j0..j6, left_arm_gripper,
-     right_arm_j0..j6, right_arm_gripper]
+The state/action vector is 23D and follows /zeno/h1/auto/wholebody/cmd
+without control_mode:
+    [torso_lift, torso_waist, head_pan, head_tilt,
+     left_arm_j0..j6,
+     right_arm_j0..j6,
+     left_gripper, right_gripper,
+     base_vx, base_vy, base_rotation]
 
-Torso is optional and changes the state/action dimension, which requires
-matching training/deployment configs.
+The bags currently contain separated joint_cmd topics rather than
+/zeno/h1/auto/wholebody/cmd. The base action is therefore taken from
+/zeno/h1/sensor/odom_raw velocity.
 
 Usage:
-    python scripts/Data_deal/convert_zeno_h1_v30.py \
-        --data-dir /home/zeno-rp/2026CoRL/Data/zeno_bag \
-        --output-dir /home/zeno-rp/2026CoRL/Data \
-        --repo-name zeno_h1_v30 \
-        --task zeno_h1
+    python scripts/data_convert/convert_zeno_h1_v30.py \
+        --data-dir /home/zeno-rp/2027icra/Data/humanmoid_pick \
+        --output-dir /home/zeno-rp/2027icra/Data/lerobot \
+        --repo-name humanmoid_pick_zeno_h1_auto_cmd_v30 \
+        --task humanmoid_pick
 """
 
 from __future__ import annotations
@@ -59,8 +65,6 @@ DEFAULT_ROBOT_TYPE = "zeno_h1"
 CAM_HEAD = "/zeno/h1/sensor/head_cam/image/compressed"
 CAM_LEFT_ARM = "/zeno/h1/sensor/left_arm_cam/image/compressed"
 CAM_RIGHT_ARM = "/zeno/h1/sensor/right_arm_cam/image/compressed"
-ALL_CAM_TOPICS = [CAM_HEAD, CAM_LEFT_ARM, CAM_RIGHT_ARM]
-
 ODOM = "/zeno/h1/sensor/odom_raw"
 
 STATE_LEFT_ARM = "/zeno/h1/wheelarm/left_arm/joint_state"
@@ -76,12 +80,27 @@ ACTION_RIGHT_GRIPPER = "/zeno/h1/right_gripper/joint_cmd"
 STATE_TORSO = "/zeno/h1/wheelarm/torso/joint_state"
 ACTION_TORSO = "/zeno/h1/wheelarm/torso/joint_cmd"
 
+TORSO_FIELD_NAMES = ["torso_lift", "torso_waist", "head_pan", "head_tilt"]
 LEFT_ARM_NAMES = [f"left_arm_j{i}" for i in range(7)]
 RIGHT_ARM_NAMES = [f"right_arm_j{i}" for i in range(7)]
-LEFT_GRIPPER_NAMES = ["left_arm_gripper"]
-RIGHT_GRIPPER_NAMES = ["right_arm_gripper"]
-TORSO_NAMES = ["torso_head_pan", "torso_head_tilt", "torso_waist", "torso_lift"]
-BASE_NAMES = ["base_vx", "base_vy", "base_omega"]
+LEFT_GRIPPER_NAMES = ["left_gripper"]
+RIGHT_GRIPPER_NAMES = ["right_gripper"]
+BASE_NAMES = ["base_vx", "base_vy", "base_rotation"]
+AUTO_CMD_FIELD_NAMES = (
+    TORSO_FIELD_NAMES
+    + LEFT_ARM_NAMES
+    + RIGHT_ARM_NAMES
+    + LEFT_GRIPPER_NAMES
+    + RIGHT_GRIPPER_NAMES
+    + BASE_NAMES
+)
+
+JOINT_NAME_ALIASES = {
+    "head_pan": ["torso_head_pan"],
+    "head_tilt": ["torso_head_tilt"],
+    "left_gripper": ["left_arm_gripper"],
+    "right_gripper": ["right_arm_gripper"],
+}
 
 FPS = 20
 DEFAULT_IMG_SIZE = 224
@@ -121,10 +140,21 @@ def extract_named_positions(msg, expected_names: list[str]) -> np.ndarray:
 
     if names:
         by_name = {name: float(pos) for name, pos in zip(names, positions)}
-        missing = [name for name in expected_names if name not in by_name]
+        values = []
+        missing = []
+        for name in expected_names:
+            aliases = [name, *JOINT_NAME_ALIASES.get(name, [])]
+            matched = next((alias for alias in aliases if alias in by_name), None)
+            if matched is None:
+                missing.append(name)
+                continue
+            values.append(by_name[matched])
         if missing:
-            raise ValueError(f"missing joint names {missing}; message has {names}")
-        return np.array([by_name[name] for name in expected_names], dtype=np.float32)
+            raise ValueError(
+                f"missing joint names {missing}; message has {names}; "
+                f"aliases={JOINT_NAME_ALIASES}"
+            )
+        return np.array(values, dtype=np.float32)
 
     if len(positions) < len(expected_names):
         raise ValueError(
@@ -133,29 +163,23 @@ def extract_named_positions(msg, expected_names: list[str]) -> np.ndarray:
     return np.array(positions[: len(expected_names)], dtype=np.float32)
 
 
-def enabled_topics(include_grippers: bool, include_torso: bool) -> list[str]:
-    topics = [
+def enabled_topics() -> list[str]:
+    return [
         CAM_HEAD,
         CAM_LEFT_ARM,
         CAM_RIGHT_ARM,
         ODOM,
+        STATE_TORSO,
+        ACTION_TORSO,
         STATE_LEFT_ARM,
         STATE_RIGHT_ARM,
         ACTION_LEFT_ARM,
         ACTION_RIGHT_ARM,
+        STATE_LEFT_GRIPPER,
+        STATE_RIGHT_GRIPPER,
+        ACTION_LEFT_GRIPPER,
+        ACTION_RIGHT_GRIPPER,
     ]
-    if include_grippers:
-        topics.extend(
-            [
-                STATE_LEFT_GRIPPER,
-                STATE_RIGHT_GRIPPER,
-                ACTION_LEFT_GRIPPER,
-                ACTION_RIGHT_GRIPPER,
-            ]
-        )
-    if include_torso:
-        topics.extend([STATE_TORSO, ACTION_TORSO])
-    return topics
 
 
 def collect_bag_paths(data_dir: str | Path, max_bags: int | None = None) -> list[Path]:
@@ -195,25 +219,12 @@ def resolve_task_label(bag_path: Path, task_override: str | None) -> str:
     return "zeno_h1"
 
 
-def vector_names(include_grippers: bool, include_torso: bool) -> list[str]:
-    names = BASE_NAMES + LEFT_ARM_NAMES
-    if include_grippers:
-        names += LEFT_GRIPPER_NAMES
-    names += RIGHT_ARM_NAMES
-    if include_grippers:
-        names += RIGHT_GRIPPER_NAMES
-    if include_torso:
-        names += TORSO_NAMES
-    return names
+def vector_names() -> list[str]:
+    return list(AUTO_CMD_FIELD_NAMES)
 
 
-def build_features(
-    img_size: tuple[int, int],
-    *,
-    include_grippers: bool,
-    include_torso: bool,
-) -> dict:
-    names = vector_names(include_grippers, include_torso)
+def build_features(img_size: tuple[int, int]) -> dict:
+    names = vector_names()
     dim = len(names)
 
     return {
@@ -253,13 +264,11 @@ def process_single_bag(
     task_label: str,
     fps: int,
     img_size: tuple[int, int],
-    include_grippers: bool,
-    include_torso: bool,
     max_frames: int | None,
 ) -> list[dict] | None:
     print(f"\n[Bag {bag_idx}/{total_bags}] Processing: {bag_path}")
     bag_start = time.time()
-    topics = enabled_topics(include_grippers, include_torso)
+    topics = enabled_topics()
     topic_set = set(topics)
 
     try:
@@ -279,27 +288,17 @@ def process_single_bag(
                 "left_arm_cam": topic_to_msgs[CAM_LEFT_ARM],
                 "right_arm_cam": topic_to_msgs[CAM_RIGHT_ARM],
                 "odom": topic_to_msgs[ODOM],
+                "state_torso": topic_to_msgs[STATE_TORSO],
+                "action_torso": topic_to_msgs[ACTION_TORSO],
                 "state_left_arm": topic_to_msgs[STATE_LEFT_ARM],
                 "state_right_arm": topic_to_msgs[STATE_RIGHT_ARM],
                 "action_left_arm": topic_to_msgs[ACTION_LEFT_ARM],
                 "action_right_arm": topic_to_msgs[ACTION_RIGHT_ARM],
+                "state_left_gripper": topic_to_msgs[STATE_LEFT_GRIPPER],
+                "state_right_gripper": topic_to_msgs[STATE_RIGHT_GRIPPER],
+                "action_left_gripper": topic_to_msgs[ACTION_LEFT_GRIPPER],
+                "action_right_gripper": topic_to_msgs[ACTION_RIGHT_GRIPPER],
             }
-            if include_grippers:
-                required.update(
-                    {
-                        "state_left_gripper": topic_to_msgs[STATE_LEFT_GRIPPER],
-                        "state_right_gripper": topic_to_msgs[STATE_RIGHT_GRIPPER],
-                        "action_left_gripper": topic_to_msgs[ACTION_LEFT_GRIPPER],
-                        "action_right_gripper": topic_to_msgs[ACTION_RIGHT_GRIPPER],
-                    }
-                )
-            if include_torso:
-                required.update(
-                    {
-                        "state_torso": topic_to_msgs[STATE_TORSO],
-                        "action_torso": topic_to_msgs[ACTION_TORSO],
-                    }
-                )
 
             for name, msgs in required.items():
                 if not msgs:
@@ -330,7 +329,7 @@ def process_single_bag(
             sample_times = t_start + np.arange(n_frames, dtype=np.int64) * step_ns
             print(
                 f"  Duration: {duration_s:.2f}s, frames: {n_frames}, "
-                f"fps: {fps}, dim: {len(vector_names(include_grippers, include_torso))}"
+                f"fps: {fps}, dim: {len(vector_names())}"
             )
 
             frames = []
@@ -353,6 +352,14 @@ def process_single_bag(
                 odom_msg = topic_to_msgs[ODOM][nearest_idx(times[ODOM], t)][1]
                 base = extract_odom_velocity(odom_msg)
 
+                torso_state = extract_named_positions(
+                    topic_to_msgs[STATE_TORSO][nearest_idx(times[STATE_TORSO], t)][1],
+                    TORSO_FIELD_NAMES,
+                )
+                torso_action = extract_named_positions(
+                    topic_to_msgs[ACTION_TORSO][nearest_idx(times[ACTION_TORSO], t)][1],
+                    TORSO_FIELD_NAMES,
+                )
                 left_arm_state = extract_named_positions(
                     topic_to_msgs[STATE_LEFT_ARM][
                         nearest_idx(times[STATE_LEFT_ARM], t)
@@ -378,65 +385,47 @@ def process_single_bag(
                     RIGHT_ARM_NAMES,
                 )
 
-                state_parts = [base, left_arm_state]
-                action_parts = [base, left_arm_action]
+                left_gripper_state = extract_named_positions(
+                    topic_to_msgs[STATE_LEFT_GRIPPER][
+                        nearest_idx(times[STATE_LEFT_GRIPPER], t)
+                    ][1],
+                    LEFT_GRIPPER_NAMES,
+                )
+                left_gripper_action = extract_named_positions(
+                    topic_to_msgs[ACTION_LEFT_GRIPPER][
+                        nearest_idx(times[ACTION_LEFT_GRIPPER], t)
+                    ][1],
+                    LEFT_GRIPPER_NAMES,
+                )
+                right_gripper_state = extract_named_positions(
+                    topic_to_msgs[STATE_RIGHT_GRIPPER][
+                        nearest_idx(times[STATE_RIGHT_GRIPPER], t)
+                    ][1],
+                    RIGHT_GRIPPER_NAMES,
+                )
+                right_gripper_action = extract_named_positions(
+                    topic_to_msgs[ACTION_RIGHT_GRIPPER][
+                        nearest_idx(times[ACTION_RIGHT_GRIPPER], t)
+                    ][1],
+                    RIGHT_GRIPPER_NAMES,
+                )
 
-                if include_grippers:
-                    state_parts.append(
-                        extract_named_positions(
-                            topic_to_msgs[STATE_LEFT_GRIPPER][
-                                nearest_idx(times[STATE_LEFT_GRIPPER], t)
-                            ][1],
-                            LEFT_GRIPPER_NAMES,
-                        )
-                    )
-                    action_parts.append(
-                        extract_named_positions(
-                            topic_to_msgs[ACTION_LEFT_GRIPPER][
-                                nearest_idx(times[ACTION_LEFT_GRIPPER], t)
-                            ][1],
-                            LEFT_GRIPPER_NAMES,
-                        )
-                    )
-
-                state_parts.append(right_arm_state)
-                action_parts.append(right_arm_action)
-
-                if include_grippers:
-                    state_parts.append(
-                        extract_named_positions(
-                            topic_to_msgs[STATE_RIGHT_GRIPPER][
-                                nearest_idx(times[STATE_RIGHT_GRIPPER], t)
-                            ][1],
-                            RIGHT_GRIPPER_NAMES,
-                        )
-                    )
-                    action_parts.append(
-                        extract_named_positions(
-                            topic_to_msgs[ACTION_RIGHT_GRIPPER][
-                                nearest_idx(times[ACTION_RIGHT_GRIPPER], t)
-                            ][1],
-                            RIGHT_GRIPPER_NAMES,
-                        )
-                    )
-
-                if include_torso:
-                    state_parts.append(
-                        extract_named_positions(
-                            topic_to_msgs[STATE_TORSO][nearest_idx(times[STATE_TORSO], t)][
-                                1
-                            ],
-                            TORSO_NAMES,
-                        )
-                    )
-                    action_parts.append(
-                        extract_named_positions(
-                            topic_to_msgs[ACTION_TORSO][
-                                nearest_idx(times[ACTION_TORSO], t)
-                            ][1],
-                            TORSO_NAMES,
-                        )
-                    )
+                state_parts = [
+                    torso_state,
+                    left_arm_state,
+                    right_arm_state,
+                    left_gripper_state,
+                    right_gripper_state,
+                    base,
+                ]
+                action_parts = [
+                    torso_action,
+                    left_arm_action,
+                    right_arm_action,
+                    left_gripper_action,
+                    right_gripper_action,
+                    base,
+                ]
 
                 frames.append(
                     {
@@ -510,25 +499,6 @@ def main() -> None:
         default=None,
         help="Optional frame limit per bag for smoke tests",
     )
-    gripper_group = parser.add_mutually_exclusive_group()
-    gripper_group.add_argument(
-        "--include-grippers",
-        dest="include_grippers",
-        action="store_true",
-        help="Include grippers after their corresponding arm in state/action (default)",
-    )
-    gripper_group.add_argument(
-        "--no-grippers",
-        dest="include_grippers",
-        action="store_false",
-        help="Do not include gripper positions in state/action",
-    )
-    parser.set_defaults(include_grippers=True)
-    parser.add_argument(
-        "--include-torso",
-        action="store_true",
-        help="Append torso joints to state/action using canonical name order",
-    )
     parser.add_argument(
         "--robot-type",
         type=str,
@@ -573,11 +543,7 @@ def main() -> None:
         print("No bag paths to process.")
         return
 
-    features = build_features(
-        img_size,
-        include_grippers=args.include_grippers,
-        include_torso=args.include_torso,
-    )
+    features = build_features(img_size)
     create_kwargs = {
         "repo_id": args.repo_name,
         "root": output_path,
@@ -594,7 +560,7 @@ def main() -> None:
     dataset = LeRobotDataset.create(**create_kwargs)
 
     total_start = time.time()
-    dim = len(vector_names(args.include_grippers, args.include_torso))
+    dim = len(vector_names())
     print(f"\n{'=' * 60}")
     print("Converting Zeno H1 to LeRobot V3.0")
     print(f"  Input:    {args.data_dir}")
@@ -603,8 +569,8 @@ def main() -> None:
     print(f"  FPS:      {args.fps}")
     print(f"  ImgSize:  {img_size}")
     print(f"  Dim:      {dim}D")
-    print(f"  Grippers: {args.include_grippers}")
-    print(f"  Torso:    {args.include_torso}")
+    print("  Layout:   /zeno/h1/auto/wholebody/cmd[1..23]")
+    print("  Note:     base action uses odom_raw velocity; wholebody cmd is not recorded")
     print("  Cameras:  head_cam, left_arm_cam, right_arm_cam")
     print(f"{'=' * 60}")
 
@@ -618,8 +584,6 @@ def main() -> None:
             task_label=task_label,
             fps=args.fps,
             img_size=img_size,
-            include_grippers=args.include_grippers,
-            include_torso=args.include_torso,
             max_frames=args.max_frames,
         )
         if result is not None:
