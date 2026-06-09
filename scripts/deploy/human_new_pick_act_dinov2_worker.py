@@ -34,6 +34,66 @@ DEFAULT_RUN_DIR = (
 )
 DEFAULT_DATASET_STATS = REPO_ROOT / "Data" / "lerobot" / "human_new_pick_zeno_h1_v30" / "meta" / "stats.json"
 
+# Embedded from Data/lerobot/human_new_pick_zeno_h1_v30/meta/stats.json so deployment
+# does not require the training dataset on the robot computer.
+EMBEDDED_ACTION_MIN = np.asarray(
+    [
+        -0.04453912004828453,
+        -0.08728089183568954,
+        -0.8109204173088074,
+        -0.4053068161010742,
+        -0.23436853289604187,
+        -0.0791284441947937,
+        -0.09168343245983124,
+        1.1333708763122559,
+        -0.09339592605829239,
+        -0.1672649383544922,
+        -0.2150437831878662,
+        -1.9192146062850952,
+        -0.5235917568206787,
+        -0.1744491159915924,
+        0.28437376022338867,
+        -1.524909496307373,
+        -0.7853744626045227,
+        -0.8922497630119324,
+        -4.0201587718502463e-13,
+        -0.003583333222195506,
+        -0.05930357053875923,
+        -0.03990600258111954,
+        -5.826073029232843e-15,
+    ],
+    dtype=np.float32,
+)
+EMBEDDED_ACTION_MAX = np.asarray(
+    [
+        6.9454602659446696e-12,
+        0.14305707812309265,
+        0.13418078422546387,
+        0.1760386973619461,
+        0.3229830861091614,
+        0.10675428807735443,
+        0.4779173731803894,
+        2.0329668521881104,
+        0.20694151520729065,
+        0.14939837157726288,
+        0.3766157329082489,
+        0.2568458020687103,
+        0.4499939978122711,
+        1.2510985136032104,
+        2.172759532928467,
+        0.2769336998462677,
+        0.478831946849823,
+        1.046875,
+        0.7357653379440308,
+        3.221508502960205,
+        0.19143040478229523,
+        0.16519059240818024,
+        0.2768456041812897,
+    ],
+    dtype=np.float32,
+)
+EMBEDDED_ACTION_STATS_SOURCE = "embedded human_new_pick_zeno_h1_v30 action min/max"
+
 IMAGE_KEYS = {
     "head_cam": "observation.images.head_cam",
     "left_arm_cam": "observation.images.left_arm_cam",
@@ -126,24 +186,36 @@ def resolve_stats_path(stats_path: str | Path | None, checkpoint_path: Path) -> 
     return DEFAULT_DATASET_STATS if DEFAULT_DATASET_STATS.is_file() else None
 
 
-def load_action_bounds(stats_path: Path | None, margin: float) -> tuple[np.ndarray, np.ndarray] | None:
-    if stats_path is None or not stats_path.is_file():
-        return None
-    with stats_path.open("r", encoding="utf-8") as f:
-        stats = json.load(f)
-
-    action_stats = stats.get("action")
-    if not action_stats:
-        return None
-    action_min = np.asarray(action_stats["min"], dtype=np.float32).reshape(-1)
-    action_max = np.asarray(action_stats["max"], dtype=np.float32).reshape(-1)
+def build_action_bounds(
+    action_min: np.ndarray,
+    action_max: np.ndarray,
+    margin: float,
+) -> tuple[np.ndarray, np.ndarray] | None:
     if action_min.shape != (ACTION_DIM,) or action_max.shape != (ACTION_DIM,):
         return None
 
+    # Keep a 1e-6 floor so nearly-constant dimensions still get a valid clamp range.
     action_range = np.maximum(action_max - action_min, NORM_EPS)
     low = action_min - margin * action_range
     high = action_max + margin * action_range
     return low, high
+
+
+def load_action_bounds(stats_path: Path | None, margin: float) -> tuple[tuple[np.ndarray, np.ndarray] | None, str]:
+    if stats_path is not None and stats_path.is_file():
+        with stats_path.open("r", encoding="utf-8") as f:
+            stats = json.load(f)
+
+        action_stats = stats.get("action")
+        if action_stats:
+            action_min = np.asarray(action_stats["min"], dtype=np.float32).reshape(-1)
+            action_max = np.asarray(action_stats["max"], dtype=np.float32).reshape(-1)
+            bounds = build_action_bounds(action_min, action_max, margin)
+            if bounds is not None:
+                return bounds, str(stats_path)
+
+    bounds = build_action_bounds(EMBEDDED_ACTION_MIN, EMBEDDED_ACTION_MAX, margin)
+    return bounds, EMBEDDED_ACTION_STATS_SOURCE
 
 
 def decode_image(image_bytes: bytes, image_size: int) -> np.ndarray | None:
@@ -180,7 +252,7 @@ class ActDinoV2Runner:
         self.use_amp = use_amp
         self.image_size = image_size
         self.clamp_actions = clamp_actions
-        self.action_bounds = load_action_bounds(self.stats_path, action_clip_margin)
+        self.action_bounds, self.action_bounds_source = load_action_bounds(self.stats_path, action_clip_margin)
 
         self.policy, self.preprocessor, self.postprocessor = self.load_policy()
 
@@ -289,7 +361,7 @@ def main() -> None:
     bounds_status = "enabled" if runner.action_bounds is not None and runner.clamp_actions else "disabled"
     print(
         f"[worker] loaded {runner.checkpoint_path} on {runner.device}; "
-        f"stats={runner.stats_path}; action_clamp={bounds_status}; "
+        f"action_stats={runner.action_bounds_source}; action_clamp={bounds_status}; "
         f"listening on {args.host}:{args.port}",
         flush=True,
     )
