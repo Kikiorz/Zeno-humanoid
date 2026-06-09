@@ -57,7 +57,7 @@ cat >"${TRAIN_LOG_DIR}/notes.md" <<EOF
 
 - Dataset action/state layout: /zeno/h1/auto/wholebody/cmd fields [1..23].
 - Field [0] control_mode is not trained; deployment should set it to 1.
-- Base action is converted from /zeno/h1/sensor/odom_raw velocity because the bags do not contain /zeno/h1/auto/wholebody/cmd.
+- Base state uses /zeno/h1/sensor/odom_raw velocity; base action uses /zeno/h1/twist/cmd.
 - Model checkpoints are written under: ${OUTPUT_DIR}
 EOF
 

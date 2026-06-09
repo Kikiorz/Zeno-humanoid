@@ -17,7 +17,7 @@ Default conversion:
     /zeno/h1/wheelarm/right_arm/joint_state
     /zeno/h1/right_gripper/joint_state
   Action:
-    /zeno/h1/sensor/odom_raw
+    /zeno/h1/twist/cmd
     /zeno/h1/wheelarm/torso/joint_cmd
     /zeno/h1/wheelarm/left_arm/joint_cmd
     /zeno/h1/left_gripper/joint_cmd
@@ -33,8 +33,9 @@ without control_mode:
      base_vx, base_vy, base_rotation]
 
 The bags currently contain separated joint_cmd topics rather than
-/zeno/h1/auto/wholebody/cmd. The base action is therefore taken from
-/zeno/h1/sensor/odom_raw velocity.
+/zeno/h1/auto/wholebody/cmd. The base action is taken from
+/zeno/h1/twist/cmd, while the base state is measured from
+/zeno/h1/sensor/odom_raw.
 
 Usage:
     python scripts/data_convert/convert_zeno_h1_v30.py \
@@ -66,6 +67,7 @@ CAM_HEAD = "/zeno/h1/sensor/head_cam/image/compressed"
 CAM_LEFT_ARM = "/zeno/h1/sensor/left_arm_cam/image/compressed"
 CAM_RIGHT_ARM = "/zeno/h1/sensor/right_arm_cam/image/compressed"
 ODOM = "/zeno/h1/sensor/odom_raw"
+TWIST_CMD = "/zeno/h1/twist/cmd"
 
 STATE_LEFT_ARM = "/zeno/h1/wheelarm/left_arm/joint_state"
 STATE_RIGHT_ARM = "/zeno/h1/wheelarm/right_arm/joint_state"
@@ -134,6 +136,13 @@ def extract_odom_velocity(msg) -> np.ndarray:
     )
 
 
+def extract_twist_velocity(msg) -> np.ndarray:
+    return np.array(
+        [msg.linear.x, msg.linear.y, msg.angular.z],
+        dtype=np.float32,
+    )
+
+
 def extract_named_positions(msg, expected_names: list[str]) -> np.ndarray:
     positions = list(msg.position)
     names = [str(name) for name in msg.name]
@@ -169,6 +178,7 @@ def enabled_topics() -> list[str]:
         CAM_LEFT_ARM,
         CAM_RIGHT_ARM,
         ODOM,
+        TWIST_CMD,
         STATE_TORSO,
         ACTION_TORSO,
         STATE_LEFT_ARM,
@@ -288,6 +298,7 @@ def process_single_bag(
                 "left_arm_cam": topic_to_msgs[CAM_LEFT_ARM],
                 "right_arm_cam": topic_to_msgs[CAM_RIGHT_ARM],
                 "odom": topic_to_msgs[ODOM],
+                "twist_cmd": topic_to_msgs[TWIST_CMD],
                 "state_torso": topic_to_msgs[STATE_TORSO],
                 "action_torso": topic_to_msgs[ACTION_TORSO],
                 "state_left_arm": topic_to_msgs[STATE_LEFT_ARM],
@@ -350,7 +361,11 @@ def process_single_bag(
                     continue
 
                 odom_msg = topic_to_msgs[ODOM][nearest_idx(times[ODOM], t)][1]
-                base = extract_odom_velocity(odom_msg)
+                twist_cmd_msg = topic_to_msgs[TWIST_CMD][
+                    nearest_idx(times[TWIST_CMD], t)
+                ][1]
+                base_state = extract_odom_velocity(odom_msg)
+                base_action = extract_twist_velocity(twist_cmd_msg)
 
                 torso_state = extract_named_positions(
                     topic_to_msgs[STATE_TORSO][nearest_idx(times[STATE_TORSO], t)][1],
@@ -416,7 +431,7 @@ def process_single_bag(
                     right_arm_state,
                     left_gripper_state,
                     right_gripper_state,
-                    base,
+                    base_state,
                 ]
                 action_parts = [
                     torso_action,
@@ -424,7 +439,7 @@ def process_single_bag(
                     right_arm_action,
                     left_gripper_action,
                     right_gripper_action,
-                    base,
+                    base_action,
                 ]
 
                 frames.append(
@@ -570,7 +585,7 @@ def main() -> None:
     print(f"  ImgSize:  {img_size}")
     print(f"  Dim:      {dim}D")
     print("  Layout:   /zeno/h1/auto/wholebody/cmd[1..23]")
-    print("  Note:     base action uses odom_raw velocity; wholebody cmd is not recorded")
+    print("  Note:     base state uses odom_raw; base action uses twist/cmd")
     print("  Cameras:  head_cam, left_arm_cam, right_arm_cam")
     print(f"{'=' * 60}")
 

@@ -18,6 +18,7 @@ env/
 outputs/
 runs/
 wandb/
+*.zip
 
 # Large local assets
 /Data/
