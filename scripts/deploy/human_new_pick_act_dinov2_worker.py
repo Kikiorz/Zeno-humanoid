@@ -30,13 +30,15 @@ DEFAULT_RUN_DIR = (
     REPO_ROOT
     / "outputs"
     / "train"
-    / "human_new_pick_act_dinov2_dinoft_20260609_093740"
+    / "new_act_dinov2_dinoft_20260612_003400"
 )
-DEFAULT_DATASET_STATS = REPO_ROOT / "Data" / "lerobot" / "human_new_pick_zeno_h1_v30" / "meta" / "stats.json"
+DEFAULT_DATASET_REPO_ID = "new_zeno_h1_v30"
+DEFAULT_DATASET_STATS = REPO_ROOT / "Data" / "lerobot" / DEFAULT_DATASET_REPO_ID / "meta" / "stats.json"
 
-# Embedded from Data/lerobot/human_new_pick_zeno_h1_v30/meta/stats.json so deployment
-# does not require the training dataset on the robot computer.
-EMBEDDED_ACTION_MIN = np.asarray(
+# Embedded action min/max so deployment does not require the training dataset on
+# the robot computer. Normalization parameters still come from the checkpoint's
+# policy_preprocessor/policy_postprocessor files.
+EMBEDDED_HUMAN_NEW_PICK_ACTION_MIN = np.asarray(
     [
         -0.04453912004828453,
         -0.08728089183568954,
@@ -64,7 +66,7 @@ EMBEDDED_ACTION_MIN = np.asarray(
     ],
     dtype=np.float32,
 )
-EMBEDDED_ACTION_MAX = np.asarray(
+EMBEDDED_HUMAN_NEW_PICK_ACTION_MAX = np.asarray(
     [
         6.9454602659446696e-12,
         0.14305707812309265,
@@ -92,7 +94,74 @@ EMBEDDED_ACTION_MAX = np.asarray(
     ],
     dtype=np.float32,
 )
-EMBEDDED_ACTION_STATS_SOURCE = "embedded human_new_pick_zeno_h1_v30 action min/max"
+
+EMBEDDED_NEW_ACTION_MIN = np.asarray(
+    [
+        -0.5,
+        -0.08729534596204758,
+        -0.5021724700927734,
+        -0.5608371496200562,
+        -1.4995142221450806,
+        -0.5235952734947205,
+        -1.5033843517303467,
+        -2.655476533108825e-12,
+        -0.8432146310806274,
+        -0.7853714227676392,
+        -1.0470620393753052,
+        -1.6801400184631348,
+        -0.43435579538345337,
+        -0.9015206098556519,
+        -1.3555295895015143e-15,
+        -1.06154203414917,
+        -0.7853816747665405,
+        -1.0468076467514038,
+        -0.0028517446480691433,
+        -7.083945843117112e-12,
+        -0.19992676377296448,
+        -0.19029513001441956,
+        -0.25883662700653076,
+    ],
+    dtype=np.float32,
+)
+EMBEDDED_NEW_ACTION_MAX = np.asarray(
+    [
+        3.795067829871074e-13,
+        0.6586799025535583,
+        0.8535528779029846,
+        0.6871141791343689,
+        1.121885895729065,
+        0.4513005316257477,
+        0.6294076442718506,
+        2.616867780685425,
+        1.5707207918167114,
+        0.7853447198867798,
+        1.0119516849517822,
+        1.0523502826690674,
+        0.9728882312774658,
+        0.9760615825653076,
+        2.617964029312134,
+        0.8757871985435486,
+        0.4483184814453125,
+        1.0469682216644287,
+        3.206333637237549,
+        3.2131052017211914,
+        0.20000000298023224,
+        0.19874873757362366,
+        0.2963835597038269,
+    ],
+    dtype=np.float32,
+)
+
+EMBEDDED_ACTION_STATS = {
+    "human_new_pick_zeno_h1_v30": (
+        EMBEDDED_HUMAN_NEW_PICK_ACTION_MIN,
+        EMBEDDED_HUMAN_NEW_PICK_ACTION_MAX,
+    ),
+    "new_zeno_h1_v30": (
+        EMBEDDED_NEW_ACTION_MIN,
+        EMBEDDED_NEW_ACTION_MAX,
+    ),
+}
 
 IMAGE_KEYS = {
     "head_cam": "observation.images.head_cam",
@@ -166,6 +235,16 @@ def resolve_checkpoint_path(path: str | Path | None) -> Path:
     )
 
 
+def checkpoint_dataset_repo_id(checkpoint_path: Path) -> str | None:
+    train_config = checkpoint_path / "train_config.json"
+    if not train_config.is_file():
+        return None
+    with train_config.open("r", encoding="utf-8") as f:
+        cfg = json.load(f)
+    repo_id = cfg.get("dataset", {}).get("repo_id")
+    return str(repo_id) if repo_id else None
+
+
 def resolve_stats_path(stats_path: str | Path | None, checkpoint_path: Path) -> Path | None:
     if stats_path:
         candidate = Path(stats_path).expanduser()
@@ -183,7 +262,10 @@ def resolve_stats_path(stats_path: str | Path | None, checkpoint_path: Path) -> 
             if candidate.is_file():
                 return candidate
 
-    return DEFAULT_DATASET_STATS if DEFAULT_DATASET_STATS.is_file() else None
+    repo_id = checkpoint_dataset_repo_id(checkpoint_path)
+    if (repo_id is None or repo_id == DEFAULT_DATASET_REPO_ID) and DEFAULT_DATASET_STATS.is_file():
+        return DEFAULT_DATASET_STATS
+    return None
 
 
 def build_action_bounds(
@@ -201,9 +283,14 @@ def build_action_bounds(
     return low, high
 
 
-def load_action_bounds(stats_path: Path | None, margin: float) -> tuple[tuple[np.ndarray, np.ndarray] | None, str]:
-    if stats_path is not None and stats_path.is_file():
-        with stats_path.open("r", encoding="utf-8") as f:
+def load_action_bounds(
+    stats_path: str | Path | None,
+    margin: float,
+    checkpoint_path: Path,
+) -> tuple[tuple[np.ndarray, np.ndarray] | None, str]:
+    stats_candidate = Path(stats_path) if stats_path is not None else None
+    if stats_candidate is not None and stats_candidate.is_file():
+        with stats_candidate.open("r", encoding="utf-8") as f:
             stats = json.load(f)
 
         action_stats = stats.get("action")
@@ -212,10 +299,19 @@ def load_action_bounds(stats_path: Path | None, margin: float) -> tuple[tuple[np
             action_max = np.asarray(action_stats["max"], dtype=np.float32).reshape(-1)
             bounds = build_action_bounds(action_min, action_max, margin)
             if bounds is not None:
-                return bounds, str(stats_path)
+                return bounds, str(stats_candidate)
 
-    bounds = build_action_bounds(EMBEDDED_ACTION_MIN, EMBEDDED_ACTION_MAX, margin)
-    return bounds, EMBEDDED_ACTION_STATS_SOURCE
+    repo_id = checkpoint_dataset_repo_id(checkpoint_path)
+    stats_keys = [repo_id, DEFAULT_DATASET_REPO_ID, "human_new_pick_zeno_h1_v30"]
+    for key in stats_keys:
+        if key not in EMBEDDED_ACTION_STATS:
+            continue
+        action_min, action_max = EMBEDDED_ACTION_STATS[key]
+        bounds = build_action_bounds(action_min, action_max, margin)
+        if bounds is not None:
+            return bounds, f"embedded {key} action min/max"
+
+    return None, "none"
 
 
 def decode_image(image_bytes: bytes, image_size: int) -> np.ndarray | None:
@@ -252,7 +348,11 @@ class ActDinoV2Runner:
         self.use_amp = use_amp
         self.image_size = image_size
         self.clamp_actions = clamp_actions
-        self.action_bounds, self.action_bounds_source = load_action_bounds(self.stats_path, action_clip_margin)
+        self.action_bounds, self.action_bounds_source = load_action_bounds(
+            self.stats_path,
+            action_clip_margin,
+            self.checkpoint_path,
+        )
 
         self.policy, self.preprocessor, self.postprocessor = self.load_policy()
 
