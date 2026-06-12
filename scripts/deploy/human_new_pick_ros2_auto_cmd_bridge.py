@@ -59,6 +59,18 @@ JOINT_NAME_ALIASES = {
 
 IMAGE_NAMES = ["head_cam", "left_arm_cam", "right_arm_cam"]
 JOINT_NAMES = ["torso", "left_arm", "right_arm", "left_gripper", "right_gripper"]
+IMAGE_TOPIC_PARAMS = {
+    "head_cam": "head_cam_topic",
+    "left_arm_cam": "left_arm_cam_topic",
+    "right_arm_cam": "right_arm_cam_topic",
+}
+JOINT_TOPIC_PARAMS = {
+    "torso": "torso_state_topic",
+    "left_arm": "left_arm_state_topic",
+    "right_arm": "right_arm_state_topic",
+    "left_gripper": "left_gripper_state_topic",
+    "right_gripper": "right_gripper_state_topic",
+}
 
 
 def send_message(sock: socket.socket, message: Any) -> None:
@@ -207,24 +219,14 @@ class HumanNewPickAutoCmdBridge(Node):
         return super().destroy_node()
 
     def create_topic_subscriptions(self) -> None:
-        image_topics = {
-            "head_cam": str(self.get_parameter("head_cam_topic").value),
-            "left_arm_cam": str(self.get_parameter("left_arm_cam_topic").value),
-            "right_arm_cam": str(self.get_parameter("right_arm_cam_topic").value),
-        }
-        for name, topic in image_topics.items():
+        for name, param_name in IMAGE_TOPIC_PARAMS.items():
+            topic = str(self.get_parameter(param_name).value)
             self.subscriptions_keepalive.append(
                 self.create_subscription(CompressedImage, topic, self.image_callback(name), 10)
             )
 
-        joint_topics = {
-            "torso": str(self.get_parameter("torso_state_topic").value),
-            "left_arm": str(self.get_parameter("left_arm_state_topic").value),
-            "right_arm": str(self.get_parameter("right_arm_state_topic").value),
-            "left_gripper": str(self.get_parameter("left_gripper_state_topic").value),
-            "right_gripper": str(self.get_parameter("right_gripper_state_topic").value),
-        }
-        for name, topic in joint_topics.items():
+        for name, param_name in JOINT_TOPIC_PARAMS.items():
+            topic = str(self.get_parameter(param_name).value)
             self.subscriptions_keepalive.append(
                 self.create_subscription(JointState, topic, self.joint_callback(name), 10)
             )
@@ -253,19 +255,42 @@ class HumanNewPickAutoCmdBridge(Node):
     def odom_callback(self, msg: Odometry) -> None:
         self.odom_cache = (msg, time.monotonic())
 
-    def cache_is_fresh(self) -> bool:
+    def observation_cache_issues(self) -> list[str]:
         now = time.monotonic()
-        for name in IMAGE_NAMES:
+        issues = []
+
+        for name, param_name in IMAGE_TOPIC_PARAMS.items():
+            topic = str(self.get_parameter(param_name).value)
             cached = self.image_cache.get(name)
-            if cached is None or now - cached[1] > self.max_obs_age_s:
-                return False
-        for name in JOINT_NAMES:
+            if cached is None:
+                issues.append(f"{name} missing topic={topic}")
+                continue
+            age_s = now - cached[1]
+            if age_s > self.max_obs_age_s:
+                issues.append(f"{name} stale age={age_s:.3f}s topic={topic}")
+
+        for name, param_name in JOINT_TOPIC_PARAMS.items():
+            topic = str(self.get_parameter(param_name).value)
             cached = self.joint_cache.get(name)
-            if cached is None or now - cached[1] > self.max_obs_age_s:
-                return False
-        if self.odom_cache is None or now - self.odom_cache[1] > self.max_obs_age_s:
-            return False
-        return True
+            if cached is None:
+                issues.append(f"{name} missing topic={topic}")
+                continue
+            age_s = now - cached[1]
+            if age_s > self.max_obs_age_s:
+                issues.append(f"{name} stale age={age_s:.3f}s topic={topic}")
+
+        odom_topic = str(self.get_parameter("odom_topic").value)
+        if self.odom_cache is None:
+            issues.append(f"odom missing topic={odom_topic}")
+        else:
+            age_s = now - self.odom_cache[1]
+            if age_s > self.max_obs_age_s:
+                issues.append(f"odom stale age={age_s:.3f}s topic={odom_topic}")
+
+        return issues
+
+    def cache_is_fresh(self) -> bool:
+        return not self.observation_cache_issues()
 
     def build_state(self) -> list[float] | None:
         required = {
@@ -282,7 +307,8 @@ class HumanNewPickAutoCmdBridge(Node):
                 return None
             values = extract_joint_positions(cached[0], fields)
             if values is None:
-                self.get_logger().warn(f"Missing joint fields for {name}: {fields}")
+                topic = str(self.get_parameter(JOINT_TOPIC_PARAMS[name]).value)
+                self.get_logger().warn(f"Missing joint fields for {name} topic={topic}: {fields}")
                 return None
             state.extend(values)
 
@@ -321,10 +347,11 @@ class HumanNewPickAutoCmdBridge(Node):
             self.publish_command([0.0] * ACTION_DIM, control_mode=0.0)
 
     def timer_callback(self) -> None:
-        if not self.cache_is_fresh():
+        cache_issues = self.observation_cache_issues()
+        if cache_issues:
             self.stale_count += 1
             if self.stale_count % self.log_every_n == 1:
-                self.get_logger().warn("Observation cache is not ready or stale")
+                self.get_logger().warn("Observation cache missing/stale: " + "; ".join(cache_issues))
             self.publish_idle()
             return
 
