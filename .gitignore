@@ -19,7 +19,8 @@ outputs/
 runs/
 wandb/
 *.zip
-
+scripts/deploy/train_log/
+train_log
 # Large local assets
 /Data/
 /Model/
