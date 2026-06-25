@@ -45,7 +45,7 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--ros-python", default=os.environ.get("ROS_PYTHON", "/usr/bin/python3"))
 
     parser.add_argument("--run-id", default=run_id)
-    parser.add_argument("--dataset-repo-id", default=dataset_repo_id)
+    parser.add_argument("--dataset-repo-id", default=dataset_repo_id, help=argparse.SUPPRESS)
     parser.add_argument("--checkpoint-path", type=Path, default=None)
     parser.add_argument("--stats-path", type=Path, default=None)
     parser.add_argument("--log-dir", type=Path, default=None)
@@ -89,19 +89,19 @@ def parse_args() -> argparse.Namespace:
     return parser.parse_args()
 
 
-def resolve_paths(args: argparse.Namespace) -> dict[str, Path]:
+def resolve_paths(args: argparse.Namespace) -> dict[str, Path | None]:
     repo_root = args.repo_root.expanduser().resolve()
     deploy_dir = repo_root / "scripts" / "deploy"
     run_dir = repo_root / "outputs" / "train" / args.run_id
     checkpoint_path = args.checkpoint_path or run_dir / "checkpoints" / "100000" / "pretrained_model"
-    stats_path = args.stats_path or repo_root / "Data" / "lerobot" / args.dataset_repo_id / "meta" / "stats.json"
+    stats_path = args.stats_path.expanduser().resolve() if args.stats_path else None
     log_dir = args.log_dir or repo_root / "outputs" / "logs" / "deploy"
 
     return {
         "repo_root": repo_root,
         "deploy_dir": deploy_dir,
         "checkpoint_path": checkpoint_path.expanduser().resolve(),
-        "stats_path": stats_path.expanduser().resolve(),
+        "stats_path": stats_path,
         "log_dir": log_dir.expanduser().resolve(),
     }
 
@@ -118,7 +118,7 @@ def process_is_running(proc: subprocess.Popen) -> bool:
     return proc.poll() is None
 
 
-def start_worker(args: argparse.Namespace, paths: dict[str, Path], worker_log_handle) -> subprocess.Popen:
+def start_worker(args: argparse.Namespace, paths: dict[str, Path | None], worker_log_handle) -> subprocess.Popen:
     worker_script = paths["deploy_dir"] / "human_new_pick_act_dinov2_worker.py"
     cmd = [
         args.conda_bin,
@@ -134,8 +134,6 @@ def start_worker(args: argparse.Namespace, paths: dict[str, Path], worker_log_ha
         str(args.worker_port),
         "--checkpoint-path",
         str(paths["checkpoint_path"]),
-        "--stats-path",
-        str(paths["stats_path"]),
         "--device",
         args.device,
         "--image-size",
@@ -145,6 +143,8 @@ def start_worker(args: argparse.Namespace, paths: dict[str, Path], worker_log_ha
         "--action-clip-margin",
         str(args.action_clip_margin),
     ]
+    if paths["stats_path"] is not None:
+        cmd.extend(["--stats-path", str(paths["stats_path"])])
     env = os.environ.copy()
     lerobot_src = paths["repo_root"] / "third_party" / "lerobot" / "src"
     env["PYTHONPATH"] = f"{lerobot_src}:{env.get('PYTHONPATH', '')}"
@@ -154,7 +154,7 @@ def start_worker(args: argparse.Namespace, paths: dict[str, Path], worker_log_ha
     return subprocess.Popen(cmd, stdout=worker_log_handle, stderr=subprocess.STDOUT, env=env)
 
 
-def bridge_command(args: argparse.Namespace, paths: dict[str, Path]) -> list[str]:
+def bridge_command(args: argparse.Namespace, paths: dict[str, Path | None]) -> list[str]:
     bridge_script = paths["deploy_dir"] / "deploy_robot4_ros2_auto_cmd_bridge.py"
     tokens = [
         args.ros_python,
@@ -227,8 +227,9 @@ def main() -> int:
     if not checkpoint_exists(paths["checkpoint_path"]):
         print(f"checkpoint not found: {paths['checkpoint_path']}", file=sys.stderr)
         return 1
-    if not paths["stats_path"].is_file():
-        print(f"warning: stats not found, action clamp may be disabled: {paths['stats_path']}", file=sys.stderr)
+    if paths["stats_path"] is not None and not paths["stats_path"].is_file():
+        print(f"stats file not found: {paths['stats_path']}", file=sys.stderr)
+        return 1
     if not args.ros_setup.is_file():
         print(f"ROS setup not found: {args.ros_setup}", file=sys.stderr)
         return 1
@@ -236,7 +237,7 @@ def main() -> int:
     print("=" * 60)
     print(f"Deploy {ROBOT} ACT+DINOv3")
     print(f"checkpoint: {paths['checkpoint_path']}")
-    print(f"stats:      {paths['stats_path']}")
+    print(f"normalizer: {'checkpoint processor files' if paths['stats_path'] is None else paths['stats_path']}")
     print(f"worker:     {args.worker_host}:{args.worker_port}")
     print(f"publish:    {args.publish_commands}")
     print(f"cmd_topic:  {args.cmd_topic}")

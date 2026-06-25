@@ -32,12 +32,10 @@ DEFAULT_RUN_DIR = (
     / "train"
     / "new_act_dinov2_dinoft_20260612_003400"
 )
-DEFAULT_DATASET_REPO_ID = "new_zeno_h1_v30"
-DEFAULT_DATASET_STATS = REPO_ROOT / "Data" / "lerobot" / DEFAULT_DATASET_REPO_ID / "meta" / "stats.json"
 
-# Embedded action min/max so deployment does not require the training dataset on
-# the robot computer. Normalization parameters still come from the checkpoint's
-# policy_preprocessor/policy_postprocessor files.
+# Legacy fallback for older checkpoints that did not save action min/max in
+# policy_preprocessor/policy_postprocessor files. New robot4/robot5 models read
+# all normalization and action bounds from the checkpoint directory.
 EMBEDDED_HUMAN_NEW_PICK_ACTION_MIN = np.asarray(
     [
         -0.04453912004828453,
@@ -246,26 +244,13 @@ def checkpoint_dataset_repo_id(checkpoint_path: Path) -> str | None:
 
 
 def resolve_stats_path(stats_path: str | Path | None, checkpoint_path: Path) -> Path | None:
-    if stats_path:
-        candidate = Path(stats_path).expanduser()
-        if not candidate.is_absolute():
-            candidate = (REPO_ROOT / candidate).resolve()
-        return candidate
-
-    train_config = checkpoint_path / "train_config.json"
-    if train_config.is_file():
-        with train_config.open("r", encoding="utf-8") as f:
-            cfg = json.load(f)
-        dataset_root = cfg.get("dataset", {}).get("root")
-        if dataset_root:
-            candidate = Path(dataset_root) / "meta" / "stats.json"
-            if candidate.is_file():
-                return candidate
-
-    repo_id = checkpoint_dataset_repo_id(checkpoint_path)
-    if (repo_id is None or repo_id == DEFAULT_DATASET_REPO_ID) and DEFAULT_DATASET_STATS.is_file():
-        return DEFAULT_DATASET_STATS
-    return None
+    del checkpoint_path
+    if not stats_path:
+        return None
+    candidate = Path(stats_path).expanduser()
+    if not candidate.is_absolute():
+        candidate = (REPO_ROOT / candidate).resolve()
+    return candidate
 
 
 def build_action_bounds(
@@ -283,11 +268,64 @@ def build_action_bounds(
     return low, high
 
 
+def load_action_bounds_from_checkpoint(
+    checkpoint_path: Path,
+    margin: float,
+) -> tuple[tuple[np.ndarray, np.ndarray] | None, str | None]:
+    state_files: list[Path] = []
+    for manifest_name in ("policy_postprocessor.json", "policy_preprocessor.json"):
+        manifest_path = checkpoint_path / manifest_name
+        if not manifest_path.is_file():
+            continue
+        with manifest_path.open("r", encoding="utf-8") as f:
+            manifest = json.load(f)
+        for step in manifest.get("steps", []):
+            state_file = step.get("state_file")
+            if state_file:
+                state_files.append(checkpoint_path / state_file)
+
+    state_files.extend(sorted(checkpoint_path.glob("policy_postprocessor*.safetensors")))
+    state_files.extend(sorted(checkpoint_path.glob("policy_preprocessor*.safetensors")))
+
+    seen: set[Path] = set()
+    unique_state_files = []
+    for path in state_files:
+        path = path.resolve()
+        if path in seen or not path.is_file():
+            continue
+        seen.add(path)
+        unique_state_files.append(path)
+
+    if not unique_state_files:
+        return None, None
+
+    try:
+        from safetensors.torch import load_file
+    except ImportError:
+        return None, "safetensors not available"
+
+    for state_file in unique_state_files:
+        tensors = load_file(str(state_file), device="cpu")
+        if "action.min" not in tensors or "action.max" not in tensors:
+            continue
+        action_min = tensors["action.min"].numpy().astype(np.float32).reshape(-1)
+        action_max = tensors["action.max"].numpy().astype(np.float32).reshape(-1)
+        bounds = build_action_bounds(action_min, action_max, margin)
+        if bounds is not None:
+            return bounds, f"checkpoint {state_file.name}: action.min/action.max"
+
+    return None, "checkpoint processor files missing action.min/action.max"
+
+
 def load_action_bounds(
     stats_path: str | Path | None,
     margin: float,
     checkpoint_path: Path,
 ) -> tuple[tuple[np.ndarray, np.ndarray] | None, str]:
+    checkpoint_bounds, checkpoint_source = load_action_bounds_from_checkpoint(checkpoint_path, margin)
+    if checkpoint_bounds is not None:
+        return checkpoint_bounds, checkpoint_source or "checkpoint"
+
     stats_candidate = Path(stats_path) if stats_path is not None else None
     if stats_candidate is not None and stats_candidate.is_file():
         with stats_candidate.open("r", encoding="utf-8") as f:
@@ -299,18 +337,17 @@ def load_action_bounds(
             action_max = np.asarray(action_stats["max"], dtype=np.float32).reshape(-1)
             bounds = build_action_bounds(action_min, action_max, margin)
             if bounds is not None:
-                return bounds, str(stats_candidate)
+                return bounds, f"explicit stats file {stats_candidate}"
 
     repo_id = checkpoint_dataset_repo_id(checkpoint_path)
-    stats_keys = [repo_id, DEFAULT_DATASET_REPO_ID, "human_new_pick_zeno_h1_v30"]
-    for key in stats_keys:
-        if key not in EMBEDDED_ACTION_STATS:
-            continue
-        action_min, action_max = EMBEDDED_ACTION_STATS[key]
+    if repo_id in EMBEDDED_ACTION_STATS:
+        action_min, action_max = EMBEDDED_ACTION_STATS[repo_id]
         bounds = build_action_bounds(action_min, action_max, margin)
         if bounds is not None:
-            return bounds, f"embedded {key} action min/max"
+            return bounds, f"embedded {repo_id} action min/max"
 
+    if checkpoint_source:
+        return None, checkpoint_source
     return None, "none"
 
 
