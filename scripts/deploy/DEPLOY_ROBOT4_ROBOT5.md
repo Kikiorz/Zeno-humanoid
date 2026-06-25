@@ -2,22 +2,28 @@
 
 部署电脑不需要训练数据，也不需要 `Data/lerobot/.../meta/stats.json`。归一化、反归一化和 action clamp 的 min/max 默认都从 checkpoint 目录里的 processor 文件读取。
 
+脚本默认会根据自身位置自动推导项目根目录：`scripts/deploy/../..`。因此项目可以放在任意用户目录下，最外层项目名也可以不同。下面的 `$REPO_ROOT` 只是为了写命令方便。
+
 ## 1. 拉代码
 
 新电脑第一次拉仓库：
 
 ```bash
-cd /home/zeno-rp
-git clone --recurse-submodules git@github.com:Kikiorz/Zeno-humanoid.git 2027icra
-cd /home/zeno-rp/2027icra
+mkdir -p ~/work
+cd ~/work
+PROJECT_DIR=zeno_humanoid_deploy
+git clone --recurse-submodules git@github.com:Kikiorz/Zeno-humanoid.git "$PROJECT_DIR"
+cd "$PROJECT_DIR"
 git checkout develop
 git submodule update --init --recursive
+export REPO_ROOT="$(pwd)"
 ```
 
 已经拉过仓库的电脑更新代码：
 
 ```bash
-cd /home/zeno-rp/2027icra
+cd /path/to/your/project
+export REPO_ROOT="$(pwd)"
 git pull
 git submodule update --init --recursive
 ```
@@ -25,7 +31,7 @@ git submodule update --init --recursive
 确认使用子库里的 lerobot：
 
 ```bash
-ls /home/zeno-rp/2027icra/third_party/lerobot/src/lerobot
+ls "$REPO_ROOT/third_party/lerobot/src/lerobot"
 ```
 
 ## 2. 放模型
@@ -35,13 +41,13 @@ ls /home/zeno-rp/2027icra/third_party/lerobot/src/lerobot
 robot4 默认模型路径：
 
 ```text
-/home/zeno-rp/2027icra/outputs/train/robot4_20260623_act_dinov3_base_dim768/checkpoints/100000/pretrained_model
+$REPO_ROOT/outputs/train/robot4_20260623_act_dinov3_base_dim768/checkpoints/100000/pretrained_model
 ```
 
 robot5 默认模型路径：
 
 ```text
-/home/zeno-rp/2027icra/outputs/train/robot5_20260623_act_dinov3_base_dim768/checkpoints/100000/pretrained_model
+$REPO_ROOT/outputs/train/robot5_20260623_act_dinov3_base_dim768/checkpoints/100000/pretrained_model
 ```
 
 模型目录至少要包含这些文件：
@@ -63,7 +69,7 @@ policy_postprocessor_step_0_unnormalizer_processor.safetensors
 先 dry-run 检查，不会真正发控制指令：
 
 ```bash
-cd /home/zeno-rp/2027icra/scripts/deploy
+cd "$REPO_ROOT/scripts/deploy"
 ./deploy_robot4_act_dinov3.py
 ```
 
@@ -82,7 +88,7 @@ action_stats=checkpoint policy_postprocessor_step_0_unnormalizer_processor.safet
 确认 topic 和动作正常后，再允许发布控制：
 
 ```bash
-cd /home/zeno-rp/2027icra/scripts/deploy
+cd "$REPO_ROOT/scripts/deploy"
 ./deploy_robot4_act_dinov3.py --publish-commands
 ```
 
@@ -93,7 +99,7 @@ robot4 默认 worker 端口是 `8764`，ROS2 node 名是 `robot4_auto_cmd_bridge
 先 dry-run 检查：
 
 ```bash
-cd /home/zeno-rp/2027icra/scripts/deploy
+cd "$REPO_ROOT/scripts/deploy"
 ./deploy_robot5_act_dinov3.py
 ```
 
@@ -112,7 +118,7 @@ action_stats=checkpoint policy_postprocessor_step_0_unnormalizer_processor.safet
 确认 topic 和动作正常后，再允许发布控制：
 
 ```bash
-cd /home/zeno-rp/2027icra/scripts/deploy
+cd "$REPO_ROOT/scripts/deploy"
 ./deploy_robot5_act_dinov3.py --publish-commands
 ```
 
@@ -120,17 +126,25 @@ robot5 默认 worker 端口是 `8765`，ROS2 node 名是 `robot5_auto_cmd_bridge
 
 ## 5. 常用参数
 
+`--checkpoint-path`、`--stats-path`、`--log-dir` 如果传相对路径，会按项目根目录 `$REPO_ROOT` 解析。
+
 如果 checkpoint 不在默认路径：
 
 ```bash
-./deploy_robot4_act_dinov3.py --checkpoint-path /path/to/pretrained_model
-./deploy_robot5_act_dinov3.py --checkpoint-path /path/to/pretrained_model
+./deploy_robot4_act_dinov3.py --checkpoint-path outputs/train/your_robot4_run/checkpoints/100000/pretrained_model
+./deploy_robot5_act_dinov3.py --checkpoint-path outputs/train/your_robot5_run/checkpoints/100000/pretrained_model
 ```
 
 如果 conda 环境名不同：
 
 ```bash
 ./deploy_robot4_act_dinov3.py --conda-env your_env_name
+```
+
+如果 `conda` 不在 `PATH` 里：
+
+```bash
+./deploy_robot4_act_dinov3.py --conda-bin /path/to/miniconda3/bin/conda
 ```
 
 如果 ROS2 setup 路径不同：
@@ -154,7 +168,7 @@ robot5 默认 worker 端口是 `8765`，ROS2 node 名是 `robot5_auto_cmd_bridge
 默认日志：
 
 ```text
-/home/zeno-rp/2027icra/outputs/logs/deploy/
+$REPO_ROOT/outputs/logs/deploy/
 ```
 
 主要看两个文件：

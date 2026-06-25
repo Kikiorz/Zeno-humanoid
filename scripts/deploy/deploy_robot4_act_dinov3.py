@@ -4,6 +4,7 @@ from __future__ import annotations
 import argparse
 import os
 import shlex
+import shutil
 import socket
 import subprocess
 import sys
@@ -12,7 +13,7 @@ from pathlib import Path
 
 
 ROBOT = "robot4"
-DEFAULT_REPO_ROOT = Path("/home/zeno-rp/2027icra")
+DEFAULT_REPO_ROOT = Path(__file__).resolve().parents[2]
 DEFAULT_RUN_ID = "robot4_20260623_act_dinov3_base_dim768"
 DEFAULT_DATASET_REPO_ID = "robot4_20260623_zeno_h1_auto_cmd_v30"
 DEFAULT_WORKER_PORT = 8764
@@ -39,7 +40,7 @@ def parse_args() -> argparse.Namespace:
 
     parser = argparse.ArgumentParser(description=f"Deploy {ROBOT} ACT+DINOv3 policy.")
     parser.add_argument("--repo-root", type=Path, default=repo_root)
-    parser.add_argument("--conda-bin", default=os.environ.get("CONDA_BIN", "/home/zeno-rp/miniconda3/bin/conda"))
+    parser.add_argument("--conda-bin", default=os.environ.get("CONDA_BIN", "conda"))
     parser.add_argument("--conda-env", default=os.environ.get("CONDA_ENV", "lerobot-qrp312"))
     parser.add_argument("--ros-setup", type=Path, default=Path(os.environ.get("ROS_SETUP", "/opt/ros/humble/setup.bash")))
     parser.add_argument("--ros-python", default=os.environ.get("ROS_PYTHON", "/usr/bin/python3"))
@@ -89,20 +90,31 @@ def parse_args() -> argparse.Namespace:
     return parser.parse_args()
 
 
+def resolve_repo_path(path: Path, repo_root: Path) -> Path:
+    candidate = path.expanduser()
+    if not candidate.is_absolute():
+        candidate = repo_root / candidate
+    return candidate.resolve()
+
+
 def resolve_paths(args: argparse.Namespace) -> dict[str, Path | None]:
     repo_root = args.repo_root.expanduser().resolve()
     deploy_dir = repo_root / "scripts" / "deploy"
     run_dir = repo_root / "outputs" / "train" / args.run_id
-    checkpoint_path = args.checkpoint_path or run_dir / "checkpoints" / "100000" / "pretrained_model"
-    stats_path = args.stats_path.expanduser().resolve() if args.stats_path else None
-    log_dir = args.log_dir or repo_root / "outputs" / "logs" / "deploy"
+    checkpoint_path = (
+        resolve_repo_path(args.checkpoint_path, repo_root)
+        if args.checkpoint_path
+        else run_dir / "checkpoints" / "100000" / "pretrained_model"
+    )
+    stats_path = resolve_repo_path(args.stats_path, repo_root) if args.stats_path else None
+    log_dir = resolve_repo_path(args.log_dir, repo_root) if args.log_dir else repo_root / "outputs" / "logs" / "deploy"
 
     return {
         "repo_root": repo_root,
         "deploy_dir": deploy_dir,
-        "checkpoint_path": checkpoint_path.expanduser().resolve(),
+        "checkpoint_path": checkpoint_path,
         "stats_path": stats_path,
-        "log_dir": log_dir.expanduser().resolve(),
+        "log_dir": log_dir,
     }
 
 
@@ -229,6 +241,13 @@ def main() -> int:
         return 1
     if paths["stats_path"] is not None and not paths["stats_path"].is_file():
         print(f"stats file not found: {paths['stats_path']}", file=sys.stderr)
+        return 1
+    if shutil.which(args.conda_bin) is None and not Path(args.conda_bin).expanduser().is_file():
+        print(
+            f"conda executable not found: {args.conda_bin}. "
+            "Set CONDA_BIN or pass --conda-bin /path/to/conda.",
+            file=sys.stderr,
+        )
         return 1
     if not args.ros_setup.is_file():
         print(f"ROS setup not found: {args.ros_setup}", file=sys.stderr)
