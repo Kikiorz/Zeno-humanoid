@@ -1,23 +1,12 @@
 #!/usr/bin/env python3
 from __future__ import annotations
 
-import sys
-
-from human_new_pick_ros2_auto_cmd_bridge import main
+from deploy_robot_runtime import parse_bridge_args, run_bridge
 
 
-DEFAULT_ROS_ARGS = [
-    "--ros-args",
-    "-r",
-    "__node:=robot5_auto_cmd_bridge",
-    "-p",
-    "worker_port:=8765",
-    "-p",
-    "publish_commands:=false",
-]
+ROBOT = "robot5"
+DEFAULT_WORKER_PORT = 8765
 
 
 if __name__ == "__main__":
-    if "--ros-args" not in sys.argv:
-        sys.argv.extend(DEFAULT_ROS_ARGS)
-    main()
+    raise SystemExit(run_bridge(ROBOT, parse_bridge_args(ROBOT, DEFAULT_WORKER_PORT)))
