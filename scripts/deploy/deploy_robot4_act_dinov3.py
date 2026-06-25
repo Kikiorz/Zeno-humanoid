@@ -17,6 +17,25 @@ DEFAULT_REPO_ROOT = Path(__file__).resolve().parents[2]
 DEFAULT_RUN_ID = "robot4_20260623_act_dinov3_base_dim768"
 DEFAULT_DATASET_REPO_ID = "robot4_20260623_zeno_h1_auto_cmd_v30"
 DEFAULT_WORKER_PORT = 8764
+ROS_ENV_VARS = {
+    "AMENT_PREFIX_PATH",
+    "COLCON_PREFIX_PATH",
+    "CMAKE_PREFIX_PATH",
+    "CYCLONEDDS_URI",
+    "FASTDDS_DEFAULT_PROFILES_FILE",
+    "FASTRTPS_DEFAULT_PROFILES_FILE",
+    "PKG_CONFIG_PATH",
+    "RMW_IMPLEMENTATION",
+    "ROS_AUTOMATIC_DISCOVERY_RANGE",
+    "ROS_DISTRO",
+    "ROS_DOMAIN_ID",
+    "ROS_LOCALHOST_ONLY",
+    "ROS_PACKAGE_PATH",
+    "ROS_PYTHON_VERSION",
+    "ROS_STATIC_PEERS",
+    "ROS_VERSION",
+}
+ROS_PATH_MARKERS = ("/opt/ros/",)
 
 
 def env_bool(name: str, default: bool) -> bool:
@@ -130,6 +149,35 @@ def process_is_running(proc: subprocess.Popen) -> bool:
     return proc.poll() is None
 
 
+def filter_ros_path_entries(value: str) -> str:
+    entries = [
+        entry
+        for entry in value.split(os.pathsep)
+        if entry and not any(marker in entry for marker in ROS_PATH_MARKERS)
+    ]
+    return os.pathsep.join(entries)
+
+
+def worker_environment(paths: dict[str, Path | None]) -> dict[str, str]:
+    env = os.environ.copy()
+    for name in ROS_ENV_VARS:
+        env.pop(name, None)
+    for name in ("PATH", "LD_LIBRARY_PATH"):
+        if name in env:
+            filtered = filter_ros_path_entries(env[name])
+            if filtered:
+                env[name] = filtered
+            else:
+                env.pop(name, None)
+
+    lerobot_src = paths["repo_root"] / "third_party" / "lerobot" / "src"
+    env["PYTHONPATH"] = str(lerobot_src)
+    env.setdefault("HF_HOME", str(paths["repo_root"] / ".hf_home"))
+    env.setdefault("HF_LEROBOT_HOME", str(paths["repo_root"] / ".hf_lerobot"))
+    env.setdefault("HF_DATASETS_CACHE", str(Path(env["HF_HOME"]) / "datasets"))
+    return env
+
+
 def start_worker(args: argparse.Namespace, paths: dict[str, Path | None], worker_log_handle) -> subprocess.Popen:
     worker_script = paths["deploy_dir"] / "human_new_pick_act_dinov2_worker.py"
     cmd = [
@@ -157,13 +205,7 @@ def start_worker(args: argparse.Namespace, paths: dict[str, Path | None], worker
     ]
     if paths["stats_path"] is not None:
         cmd.extend(["--stats-path", str(paths["stats_path"])])
-    env = os.environ.copy()
-    lerobot_src = paths["repo_root"] / "third_party" / "lerobot" / "src"
-    env["PYTHONPATH"] = f"{lerobot_src}:{env.get('PYTHONPATH', '')}"
-    env.setdefault("HF_HOME", str(paths["repo_root"] / ".hf_home"))
-    env.setdefault("HF_LEROBOT_HOME", str(paths["repo_root"] / ".hf_lerobot"))
-    env.setdefault("HF_DATASETS_CACHE", str(Path(env["HF_HOME"]) / "datasets"))
-    return subprocess.Popen(cmd, stdout=worker_log_handle, stderr=subprocess.STDOUT, env=env)
+    return subprocess.Popen(cmd, stdout=worker_log_handle, stderr=subprocess.STDOUT, env=worker_environment(paths))
 
 
 def bridge_command(args: argparse.Namespace, paths: dict[str, Path | None]) -> list[str]:

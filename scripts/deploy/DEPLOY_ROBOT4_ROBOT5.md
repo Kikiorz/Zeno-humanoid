@@ -66,6 +66,8 @@ policy_postprocessor_step_0_unnormalizer_processor.safetensors
 
 ## 3. robot4 电脑启动
 
+启动脚本会自动分开两个运行环境：模型 worker 用 conda，ROS2 bridge 用系统 ROS Python。通常不用在当前 shell 里手动 `source /opt/ros/...`，脚本只会在 bridge 子进程里 source ROS，并且会从 worker 子进程环境里清掉 ROS 相关变量。
+
 先 dry-run 检查，不会真正发控制指令：
 
 ```bash
