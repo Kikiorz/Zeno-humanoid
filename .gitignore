@@ -5,6 +5,10 @@ __pycache__/
 .pytest_cache/
 .ruff_cache/
 .mypy_cache/
+20260624
+20260624_git
+/20260624_git/
+/20260624/
 
 # Environments
 .venv/
@@ -27,6 +31,7 @@ train_log
 /data/
 /models/
 /checkpoints/
+/pretrained/
 
 # System/editor files
 .DS_Store
