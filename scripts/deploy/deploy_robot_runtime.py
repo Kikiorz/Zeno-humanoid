@@ -107,12 +107,18 @@ def terminate(proc: subprocess.Popen | None) -> None:
         proc.wait(timeout=5)
 
 
-def add_worker_args(parser: argparse.ArgumentParser, default_run_id: str, default_port: int) -> None:
+def add_worker_args(
+    parser: argparse.ArgumentParser,
+    default_run_id: str,
+    default_port: int,
+    default_checkpoint_step: str,
+) -> None:
     repo_root = Path(os.environ.get("REPO_ROOT", DEFAULT_REPO_ROOT)).expanduser()
     parser.add_argument("--repo-root", type=Path, default=repo_root)
     parser.add_argument("--conda-bin", default=os.environ.get("CONDA_BIN", "conda"))
     parser.add_argument("--conda-env", default=os.environ.get("CONDA_ENV", "lerobot-qrp312"))
     parser.add_argument("--run-id", default=os.environ.get("RUN_ID", default_run_id))
+    parser.add_argument("--checkpoint-step", default=os.environ.get("CHECKPOINT_STEP", default_checkpoint_step))
     parser.add_argument("--checkpoint-path", type=Path, default=None)
     parser.add_argument("--stats-path", type=Path, default=None)
     parser.add_argument("--worker-host", default=os.environ.get("WORKER_HOST", "127.0.0.1"))
@@ -126,9 +132,14 @@ def add_worker_args(parser: argparse.ArgumentParser, default_run_id: str, defaul
     add_bool_flags(parser, "clamp-actions", env_bool("CLAMP_ACTIONS", True), "Clamp actions to checkpoint action bounds.")
 
 
-def parse_worker_args(robot: str, default_run_id: str, default_port: int) -> argparse.Namespace:
+def parse_worker_args(
+    robot: str,
+    default_run_id: str,
+    default_port: int,
+    default_checkpoint_step: str = "100000",
+) -> argparse.Namespace:
     parser = argparse.ArgumentParser(description=f"Start {robot} ACT+DINOv3 model worker only.")
-    add_worker_args(parser, default_run_id, default_port)
+    add_worker_args(parser, default_run_id, default_port, default_checkpoint_step)
     return parser.parse_args()
 
 
@@ -138,7 +149,7 @@ def worker_paths(args: argparse.Namespace) -> dict[str, Path | None]:
     checkpoint_path = (
         resolve_repo_path(args.checkpoint_path, repo_root)
         if args.checkpoint_path
-        else run_dir / "checkpoints" / "100000" / "pretrained_model"
+        else run_dir / "checkpoints" / args.checkpoint_step / "pretrained_model"
     )
     stats_path = resolve_repo_path(args.stats_path, repo_root) if args.stats_path else None
     return {

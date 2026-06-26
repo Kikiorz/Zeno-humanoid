@@ -41,7 +41,7 @@ ls "$REPO_ROOT/third_party/lerobot/src/lerobot"
 robot4 默认模型路径：
 
 ```text
-$REPO_ROOT/outputs/train/robot4_20260623_act_dinov3_base_dim768/checkpoints/100000/pretrained_model
+$REPO_ROOT/outputs/train/robot4_20260623_act_dinov3_base_fullft/checkpoints/080000/pretrained_model
 ```
 
 robot5 默认模型路径：
