@@ -253,6 +253,12 @@ def add_bridge_args(parser: argparse.ArgumentParser, default_port: int) -> None:
     parser.add_argument("--rate-hz", type=float, default=float(os.environ.get("RATE_HZ", "20.0")))
     parser.add_argument("--max-obs-age-s", type=float, default=float(os.environ.get("MAX_OBS_AGE_S", "0.5")))
     parser.add_argument("--log-every-n", type=int, default=int(os.environ.get("LOG_EVERY_N", "20")))
+    add_bool_flags(
+        parser,
+        "log-full-action",
+        env_bool("LOG_FULL_ACTION", False),
+        "Log all 23 action values and joint target-current deltas.",
+    )
     parser.add_argument("--cmd-topic", default=os.environ.get("CMD_TOPIC", "/zeno/h1/auto/wholebody/cmd"))
     parser.add_argument("--head-cam-topic", default=os.environ.get("HEAD_CAM_TOPIC", "/zeno/h1/sensor/head_cam/image/compressed"))
     parser.add_argument("--left-arm-cam-topic", default=os.environ.get("LEFT_ARM_CAM_TOPIC", "/zeno/h1/sensor/left_arm_cam/image/compressed"))
@@ -298,6 +304,8 @@ def bridge_command(robot: str, args: argparse.Namespace) -> list[str]:
         f"max_obs_age_s:={args.max_obs_age_s}",
         "-p",
         f"log_every_n:={args.log_every_n}",
+        "-p",
+        f"log_full_action:={str(args.log_full_action).lower()}",
         "-p",
         f"cmd_topic:={args.cmd_topic}",
         "-p",

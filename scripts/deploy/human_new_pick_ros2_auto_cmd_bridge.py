@@ -123,6 +123,12 @@ def odom_velocity(msg: Odometry) -> list[float]:
     return [float(twist.linear.x), float(twist.linear.y), float(twist.angular.z)]
 
 
+def format_named_values(names: Sequence[str], values: Sequence[float]) -> str:
+    return ", ".join(
+        f"{name}={float(value):.4f}" for name, value in zip(names, values, strict=False)
+    )
+
+
 class WorkerClient:
     def __init__(self, host: str, port: int, timeout_s: float) -> None:
         self.host = host
@@ -169,6 +175,7 @@ class HumanNewPickAutoCmdBridge(Node):
         self.declare_parameter("rate_hz", 20.0)
         self.declare_parameter("max_obs_age_s", 0.5)
         self.declare_parameter("log_every_n", 20)
+        self.declare_parameter("log_full_action", False)
         self.declare_parameter("cmd_topic", CMD_TOPIC)
         self.declare_parameter("head_cam_topic", CAM_HEAD_TOPIC)
         self.declare_parameter("left_arm_cam_topic", CAM_LEFT_ARM_TOPIC)
@@ -186,6 +193,7 @@ class HumanNewPickAutoCmdBridge(Node):
         self.rate_hz = float(self.get_parameter("rate_hz").value)
         self.max_obs_age_s = float(self.get_parameter("max_obs_age_s").value)
         self.log_every_n = max(1, int(self.get_parameter("log_every_n").value))
+        self.log_full_action = bool(self.get_parameter("log_full_action").value)
         self.worker = WorkerClient(
             host=str(self.get_parameter("worker_host").value),
             port=int(self.get_parameter("worker_port").value),
@@ -389,13 +397,22 @@ class HumanNewPickAutoCmdBridge(Node):
         self.infer_count += 1
         if self.infer_count % self.log_every_n == 1:
             latency_s = float(response.get("latency_s", 0.0))
-            sample = ", ".join(
-                f"{name}={float(value):.4f}"
-                for name, value in zip(ACTION_FIELDS[:6], action[:6], strict=False)
-            )
-            self.get_logger().info(
-                f"action[{self.infer_count}] latency={latency_s:.3f}s: {sample}, ..."
-            )
+            if self.log_full_action:
+                action_log = format_named_values(ACTION_FIELDS, action)
+                joint_delta = [
+                    float(action_value) - float(state_value)
+                    for action_value, state_value in zip(action[:20], state[:20], strict=False)
+                ]
+                delta_log = format_named_values(ACTION_FIELDS[:20], joint_delta)
+                self.get_logger().info(
+                    f"action[{self.infer_count}] latency={latency_s:.3f}s: {action_log}"
+                )
+                self.get_logger().info(f"joint_delta[{self.infer_count}]: {delta_log}")
+            else:
+                sample = format_named_values(ACTION_FIELDS[:6], action[:6])
+                self.get_logger().info(
+                    f"action[{self.infer_count}] latency={latency_s:.3f}s: {sample}, ..."
+                )
 
 
 def main() -> None:
