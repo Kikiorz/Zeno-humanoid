@@ -404,6 +404,8 @@ class ActDinoV2Runner:
         config.device = self.device
         if hasattr(config, "dinov2_pretrained"):
             config.dinov2_pretrained = False
+        if hasattr(config, "dinov2_pretrained_weights"):
+            config.dinov2_pretrained_weights = None
         if self.n_action_steps_override is not None:
             config.n_action_steps = self.n_action_steps_override
         if self.temporal_ensemble_coeff_override is not None:
