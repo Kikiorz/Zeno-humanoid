@@ -157,6 +157,18 @@ robot5 默认 worker 端口是 `8765`，ROS2 node 名是 `robot5_auto_cmd_bridge
 ./deploy_robot4_act_dinov3.py --conda-env your_env_name
 ```
 
+如果实际效果发散或明显滞后，先测试每一步都重新推理，避免执行 checkpoint 默认的 100 步 action queue：
+
+```bash
+./deploy_robot4_act_dinov3.py --n-action-steps 1
+```
+
+如果要测试 ACT temporal ensemble，需要同时让 `n_action_steps=1`：
+
+```bash
+./deploy_robot4_act_dinov3.py --n-action-steps 1 --temporal-ensemble-coeff 0.01
+```
+
 如果 `conda` 不在 `PATH` 里：
 
 ```bash

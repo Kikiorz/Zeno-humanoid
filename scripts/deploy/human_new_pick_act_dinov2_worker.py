@@ -378,6 +378,8 @@ class ActDinoV2Runner:
         image_size: int,
         clamp_actions: bool,
         action_clip_margin: float,
+        n_action_steps: int | None,
+        temporal_ensemble_coeff: float | None,
     ) -> None:
         self.checkpoint_path = resolve_checkpoint_path(checkpoint_path)
         self.stats_path = resolve_stats_path(stats_path, self.checkpoint_path)
@@ -385,6 +387,10 @@ class ActDinoV2Runner:
         self.use_amp = use_amp
         self.image_size = image_size
         self.clamp_actions = clamp_actions
+        if n_action_steps is not None and n_action_steps < 1:
+            raise ValueError("n_action_steps must be >= 1")
+        self.n_action_steps_override = n_action_steps
+        self.temporal_ensemble_coeff_override = temporal_ensemble_coeff
         self.action_bounds, self.action_bounds_source = load_action_bounds(
             self.stats_path,
             action_clip_margin,
@@ -398,6 +404,14 @@ class ActDinoV2Runner:
         config.device = self.device
         if hasattr(config, "dinov2_pretrained"):
             config.dinov2_pretrained = False
+        if self.n_action_steps_override is not None:
+            config.n_action_steps = self.n_action_steps_override
+        if self.temporal_ensemble_coeff_override is not None:
+            config.temporal_ensemble_coeff = self.temporal_ensemble_coeff_override
+            if self.n_action_steps_override is None:
+                config.n_action_steps = 1
+        if getattr(config, "temporal_ensemble_coeff", None) is not None and getattr(config, "n_action_steps", 1) != 1:
+            raise ValueError("temporal ensemble requires n_action_steps=1")
 
         policy_class = get_policy_class(config.type)
         policy = policy_class.from_pretrained(
@@ -469,6 +483,8 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--clamp-actions", dest="clamp_actions", action="store_true", default=True)
     parser.add_argument("--no-clamp-actions", dest="clamp_actions", action="store_false")
     parser.add_argument("--action-clip-margin", type=float, default=0.05)
+    parser.add_argument("--n-action-steps", type=int, default=None)
+    parser.add_argument("--temporal-ensemble-coeff", type=float, default=None)
     return parser.parse_args()
 
 
@@ -494,11 +510,15 @@ def main() -> None:
         args.image_size,
         args.clamp_actions,
         args.action_clip_margin,
+        args.n_action_steps,
+        args.temporal_ensemble_coeff,
     )
     bounds_status = "enabled" if runner.action_bounds is not None and runner.clamp_actions else "disabled"
     print(
         f"[worker] loaded {runner.checkpoint_path} on {runner.device}; "
         f"action_stats={runner.action_bounds_source}; action_clamp={bounds_status}; "
+        f"n_action_steps={runner.policy.config.n_action_steps}; "
+        f"temporal_ensemble_coeff={runner.policy.config.temporal_ensemble_coeff}; "
         f"listening on {args.host}:{args.port}",
         flush=True,
     )

@@ -120,6 +120,8 @@ def add_worker_args(parser: argparse.ArgumentParser, default_run_id: str, defaul
     parser.add_argument("--device", default=os.environ.get("DEVICE", "cuda"))
     parser.add_argument("--image-size", type=int, default=int(os.environ.get("IMAGE_SIZE", "224")))
     parser.add_argument("--action-clip-margin", type=float, default=float(os.environ.get("ACTION_CLIP_MARGIN", "0.05")))
+    parser.add_argument("--n-action-steps", type=int, default=None)
+    parser.add_argument("--temporal-ensemble-coeff", type=float, default=None)
     add_bool_flags(parser, "use-amp", env_bool("USE_AMP", True), "Use CUDA autocast in the model worker.")
     add_bool_flags(parser, "clamp-actions", env_bool("CLAMP_ACTIONS", True), "Clamp actions to checkpoint action bounds.")
 
@@ -172,6 +174,10 @@ def worker_command(args: argparse.Namespace, paths: dict[str, Path | None]) -> l
         "--action-clip-margin",
         str(args.action_clip_margin),
     ]
+    if args.n_action_steps is not None:
+        cmd.extend(["--n-action-steps", str(args.n_action_steps)])
+    if args.temporal_ensemble_coeff is not None:
+        cmd.extend(["--temporal-ensemble-coeff", str(args.temporal_ensemble_coeff)])
     if paths["stats_path"] is not None:
         cmd.extend(["--stats-path", str(paths["stats_path"])])
     return cmd
@@ -197,6 +203,8 @@ def run_worker(robot: str, args: argparse.Namespace) -> int:
     print(f"Start {robot} ACT+DINOv3 model worker")
     print(f"checkpoint: {paths['checkpoint_path']}")
     print(f"normalizer: {'checkpoint processor files' if paths['stats_path'] is None else paths['stats_path']}")
+    print(f"n_action_steps: {args.n_action_steps if args.n_action_steps is not None else 'checkpoint default'}")
+    print(f"temporal_ensemble_coeff: {args.temporal_ensemble_coeff if args.temporal_ensemble_coeff is not None else 'checkpoint default'}")
     print(f"worker:     {args.worker_host}:{args.worker_port}")
     print("bridge:     start the ROS2 bridge in a separate terminal")
     print("=" * 60)
