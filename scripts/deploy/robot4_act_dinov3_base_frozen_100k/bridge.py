@@ -1,6 +1,7 @@
 #!/usr/bin/env python3
 from __future__ import annotations
 
+import argparse
 import math
 import pickle
 import socket
@@ -16,26 +17,14 @@ try:
     from std_msgs.msg import Float64MultiArray
 except ImportError as exc:
     raise SystemExit(
-        "Run this bridge with ROS2 system Python, not the conda model Python. "
-        "Example: source /opt/ros/humble/setup.bash && /usr/bin/python3 "
-        "scripts/deploy/human_new_pick_ros2_auto_cmd_bridge.py"
+        "Run bridge.py with ROS2 system Python, not the conda model Python. "
+        "Example: source /opt/ros/humble/setup.bash && /usr/bin/python3 bridge.py"
     ) from exc
 
 
+ROBOT = "robot4"
 ACTION_DIM = 23
 COMMAND_DIM = 24
-
-CMD_TOPIC = "/zeno/h1/auto/wholebody/cmd"
-CAM_HEAD_TOPIC = "/zeno/h1/sensor/head_cam/image/compressed"
-CAM_LEFT_ARM_TOPIC = "/zeno/h1/sensor/left_arm_cam/image/compressed"
-CAM_RIGHT_ARM_TOPIC = "/zeno/h1/sensor/right_arm_cam/image/compressed"
-ODOM_TOPIC = "/zeno/h1/sensor/odom_raw"
-STATE_TORSO_TOPIC = "/zeno/h1/wheelarm/torso/joint_state"
-STATE_LEFT_ARM_TOPIC = "/zeno/h1/wheelarm/left_arm/joint_state"
-STATE_RIGHT_ARM_TOPIC = "/zeno/h1/wheelarm/right_arm/joint_state"
-STATE_LEFT_GRIPPER_TOPIC = "/zeno/h1/left_gripper/joint_state"
-STATE_RIGHT_GRIPPER_TOPIC = "/zeno/h1/right_gripper/joint_state"
-
 TORSO_FIELDS = ["torso_lift", "torso_waist", "head_pan", "head_tilt"]
 LEFT_ARM_FIELDS = [f"left_arm_j{i}" for i in range(7)]
 RIGHT_ARM_FIELDS = [f"right_arm_j{i}" for i in range(7)]
@@ -49,16 +38,13 @@ ACTION_FIELDS = (
     + RIGHT_GRIPPER_FIELDS
     + ["base_vx", "base_vy", "base_rotation"]
 )
-
 JOINT_NAME_ALIASES = {
     "head_pan": ["torso_head_pan"],
     "head_tilt": ["torso_head_tilt"],
     "left_gripper": ["left_arm_gripper"],
     "right_gripper": ["right_arm_gripper"],
 }
-
 IMAGE_NAMES = ["head_cam", "left_arm_cam", "right_arm_cam"]
-JOINT_NAMES = ["torso", "left_arm", "right_arm", "left_gripper", "right_gripper"]
 IMAGE_TOPIC_PARAMS = {
     "head_cam": "head_cam_topic",
     "left_arm_cam": "left_arm_cam_topic",
@@ -70,6 +56,13 @@ JOINT_TOPIC_PARAMS = {
     "right_arm": "right_arm_state_topic",
     "left_gripper": "left_gripper_state_topic",
     "right_gripper": "right_gripper_state_topic",
+}
+REQUIRED_JOINTS = {
+    "torso": TORSO_FIELDS,
+    "left_arm": LEFT_ARM_FIELDS,
+    "right_arm": RIGHT_ARM_FIELDS,
+    "left_gripper": LEFT_GRIPPER_FIELDS,
+    "right_gripper": RIGHT_GRIPPER_FIELDS,
 }
 
 
@@ -99,11 +92,8 @@ def recv_message(sock: socket.socket) -> Any:
 def extract_joint_positions(msg: JointState, fields: Sequence[str]) -> list[float] | None:
     if len(msg.position) == 0:
         return None
-
     if msg.name:
-        by_name = {
-            name: float(position) for name, position in zip(msg.name, msg.position, strict=False)
-        }
+        by_name = {name: float(pos) for name, pos in zip(msg.name, msg.position, strict=False)}
         values = []
         for field in fields:
             names = [field, *JOINT_NAME_ALIASES.get(field, [])]
@@ -112,7 +102,6 @@ def extract_joint_positions(msg: JointState, fields: Sequence[str]) -> list[floa
                 return None
             values.append(value)
         return values
-
     if len(msg.position) < len(fields):
         return None
     return [float(value) for value in msg.position[: len(fields)]]
@@ -124,9 +113,7 @@ def odom_velocity(msg: Odometry) -> list[float]:
 
 
 def format_named_values(names: Sequence[str], values: Sequence[float]) -> str:
-    return ", ".join(
-        f"{name}={float(value):.4f}" for name, value in zip(names, values, strict=False)
-    )
+    return ", ".join(f"{name}={float(value):.4f}" for name, value in zip(names, values, strict=False))
 
 
 class WorkerClient:
@@ -162,43 +149,18 @@ class WorkerClient:
             raise
 
 
-class HumanNewPickAutoCmdBridge(Node):
-    def __init__(self) -> None:
-        super().__init__("human_new_pick_auto_cmd_bridge")
-
-        self.declare_parameter("worker_host", "127.0.0.1")
-        self.declare_parameter("worker_port", 8765)
-        self.declare_parameter("worker_timeout_s", 1.0)
-        self.declare_parameter("publish_commands", False)
-        self.declare_parameter("publish_idle_on_stale", True)
-        self.declare_parameter("control_mode", 1.0)
-        self.declare_parameter("rate_hz", 20.0)
-        self.declare_parameter("max_obs_age_s", 0.5)
-        self.declare_parameter("log_every_n", 20)
-        self.declare_parameter("log_full_action", False)
-        self.declare_parameter("cmd_topic", CMD_TOPIC)
-        self.declare_parameter("head_cam_topic", CAM_HEAD_TOPIC)
-        self.declare_parameter("left_arm_cam_topic", CAM_LEFT_ARM_TOPIC)
-        self.declare_parameter("right_arm_cam_topic", CAM_RIGHT_ARM_TOPIC)
-        self.declare_parameter("odom_topic", ODOM_TOPIC)
-        self.declare_parameter("torso_state_topic", STATE_TORSO_TOPIC)
-        self.declare_parameter("left_arm_state_topic", STATE_LEFT_ARM_TOPIC)
-        self.declare_parameter("right_arm_state_topic", STATE_RIGHT_ARM_TOPIC)
-        self.declare_parameter("left_gripper_state_topic", STATE_LEFT_GRIPPER_TOPIC)
-        self.declare_parameter("right_gripper_state_topic", STATE_RIGHT_GRIPPER_TOPIC)
-
-        self.publish_commands = bool(self.get_parameter("publish_commands").value)
-        self.publish_idle_on_stale = bool(self.get_parameter("publish_idle_on_stale").value)
-        self.control_mode = float(self.get_parameter("control_mode").value)
-        self.rate_hz = float(self.get_parameter("rate_hz").value)
-        self.max_obs_age_s = float(self.get_parameter("max_obs_age_s").value)
-        self.log_every_n = max(1, int(self.get_parameter("log_every_n").value))
-        self.log_full_action = bool(self.get_parameter("log_full_action").value)
-        self.worker = WorkerClient(
-            host=str(self.get_parameter("worker_host").value),
-            port=int(self.get_parameter("worker_port").value),
-            timeout_s=float(self.get_parameter("worker_timeout_s").value),
-        )
+class AutoCmdBridge(Node):
+    def __init__(self, args: argparse.Namespace) -> None:
+        super().__init__(f"{ROBOT}_auto_cmd_bridge")
+        self.publish_commands = args.publish_commands
+        self.publish_idle_on_stale = args.publish_idle_on_stale
+        self.control_mode = args.control_mode
+        self.rate_hz = args.rate_hz
+        self.max_obs_age_s = args.max_obs_age_s
+        self.log_every_n = max(1, args.log_every_n)
+        self.log_full_action = args.log_full_action
+        self.worker = WorkerClient(args.worker_host, args.worker_port, args.worker_timeout_s)
+        self.topics = vars(args)
 
         self.image_cache: dict[str, tuple[bytes, float]] = {}
         self.joint_cache: dict[str, tuple[JointState, float]] = {}
@@ -207,19 +169,14 @@ class HumanNewPickAutoCmdBridge(Node):
         self.infer_count = 0
         self.stale_count = 0
         self.worker_error_count = 0
-
-        self.publisher = self.create_publisher(
-            Float64MultiArray,
-            str(self.get_parameter("cmd_topic").value),
-            10,
-        )
+        self.publisher = self.create_publisher(Float64MultiArray, args.cmd_topic, 10)
         self.create_topic_subscriptions()
         self.timer = self.create_timer(1.0 / self.rate_hz, self.timer_callback)
 
         mode = "PUBLISH" if self.publish_commands else "DRY-RUN"
         self.get_logger().info(
-            f"bridge mode={mode}; worker={self.worker.host}:{self.worker.port}; "
-            f"rate={self.rate_hz:.1f}Hz; cmd_topic={self.get_parameter('cmd_topic').value}"
+            f"mode={mode}; worker={args.worker_host}:{args.worker_port}; "
+            f"rate={self.rate_hz:.1f}Hz; cmd_topic={args.cmd_topic}"
         )
 
     def destroy_node(self) -> bool:
@@ -227,25 +184,16 @@ class HumanNewPickAutoCmdBridge(Node):
         return super().destroy_node()
 
     def create_topic_subscriptions(self) -> None:
-        for name, param_name in IMAGE_TOPIC_PARAMS.items():
-            topic = str(self.get_parameter(param_name).value)
+        for name, arg_name in IMAGE_TOPIC_PARAMS.items():
             self.subscriptions_keepalive.append(
-                self.create_subscription(CompressedImage, topic, self.image_callback(name), 10)
+                self.create_subscription(CompressedImage, self.topics[arg_name], self.image_callback(name), 10)
             )
-
-        for name, param_name in JOINT_TOPIC_PARAMS.items():
-            topic = str(self.get_parameter(param_name).value)
+        for name, arg_name in JOINT_TOPIC_PARAMS.items():
             self.subscriptions_keepalive.append(
-                self.create_subscription(JointState, topic, self.joint_callback(name), 10)
+                self.create_subscription(JointState, self.topics[arg_name], self.joint_callback(name), 10)
             )
-
         self.subscriptions_keepalive.append(
-            self.create_subscription(
-                Odometry,
-                str(self.get_parameter("odom_topic").value),
-                self.odom_callback,
-                10,
-            )
+            self.create_subscription(Odometry, self.topics["odom_topic"], self.odom_callback, 10)
         )
 
     def image_callback(self, name: str) -> Callable[[CompressedImage], None]:
@@ -266,69 +214,40 @@ class HumanNewPickAutoCmdBridge(Node):
     def observation_cache_issues(self) -> list[str]:
         now = time.monotonic()
         issues = []
-
-        for name, param_name in IMAGE_TOPIC_PARAMS.items():
-            topic = str(self.get_parameter(param_name).value)
+        for name, arg_name in IMAGE_TOPIC_PARAMS.items():
             cached = self.image_cache.get(name)
             if cached is None:
-                issues.append(f"{name} missing topic={topic}")
-                continue
-            age_s = now - cached[1]
-            if age_s > self.max_obs_age_s:
-                issues.append(f"{name} stale age={age_s:.3f}s topic={topic}")
-
-        for name, param_name in JOINT_TOPIC_PARAMS.items():
-            topic = str(self.get_parameter(param_name).value)
+                issues.append(f"{name} missing topic={self.topics[arg_name]}")
+            elif now - cached[1] > self.max_obs_age_s:
+                issues.append(f"{name} stale age={now - cached[1]:.3f}s topic={self.topics[arg_name]}")
+        for name, arg_name in JOINT_TOPIC_PARAMS.items():
             cached = self.joint_cache.get(name)
             if cached is None:
-                issues.append(f"{name} missing topic={topic}")
-                continue
-            age_s = now - cached[1]
-            if age_s > self.max_obs_age_s:
-                issues.append(f"{name} stale age={age_s:.3f}s topic={topic}")
-
-        odom_topic = str(self.get_parameter("odom_topic").value)
+                issues.append(f"{name} missing topic={self.topics[arg_name]}")
+            elif now - cached[1] > self.max_obs_age_s:
+                issues.append(f"{name} stale age={now - cached[1]:.3f}s topic={self.topics[arg_name]}")
         if self.odom_cache is None:
-            issues.append(f"odom missing topic={odom_topic}")
-        else:
-            age_s = now - self.odom_cache[1]
-            if age_s > self.max_obs_age_s:
-                issues.append(f"odom stale age={age_s:.3f}s topic={odom_topic}")
-
+            issues.append(f"odom missing topic={self.topics['odom_topic']}")
+        elif now - self.odom_cache[1] > self.max_obs_age_s:
+            issues.append(f"odom stale age={now - self.odom_cache[1]:.3f}s topic={self.topics['odom_topic']}")
         return issues
 
-    def cache_is_fresh(self) -> bool:
-        return not self.observation_cache_issues()
-
     def build_state(self) -> list[float] | None:
-        required = {
-            "torso": TORSO_FIELDS,
-            "left_arm": LEFT_ARM_FIELDS,
-            "right_arm": RIGHT_ARM_FIELDS,
-            "left_gripper": LEFT_GRIPPER_FIELDS,
-            "right_gripper": RIGHT_GRIPPER_FIELDS,
-        }
         state = []
-        for name, fields in required.items():
+        for name, fields in REQUIRED_JOINTS.items():
             cached = self.joint_cache.get(name)
             if cached is None:
                 return None
             values = extract_joint_positions(cached[0], fields)
             if values is None:
-                topic = str(self.get_parameter(JOINT_TOPIC_PARAMS[name]).value)
-                self.get_logger().warn(f"Missing joint fields for {name} topic={topic}: {fields}")
+                self.get_logger().warn(f"Missing joint fields for {name}: {fields}")
                 return None
             state.extend(values)
-
         if self.odom_cache is None:
             return None
         state.extend(odom_velocity(self.odom_cache[0]))
-
-        if len(state) != ACTION_DIM:
-            self.get_logger().warn(f"Unexpected state length: {len(state)}")
-            return None
-        if any(not math.isfinite(value) for value in state):
-            self.get_logger().warn("State contains NaN or Inf")
+        if len(state) != ACTION_DIM or any(not math.isfinite(v) for v in state):
+            self.get_logger().warn(f"Invalid state length={len(state)}")
             return None
         return state
 
@@ -355,20 +274,18 @@ class HumanNewPickAutoCmdBridge(Node):
             self.publish_command([0.0] * ACTION_DIM, control_mode=0.0)
 
     def timer_callback(self) -> None:
-        cache_issues = self.observation_cache_issues()
-        if cache_issues:
+        issues = self.observation_cache_issues()
+        if issues:
             self.stale_count += 1
             if self.stale_count % self.log_every_n == 1:
-                self.get_logger().warn("Observation cache missing/stale: " + "; ".join(cache_issues))
+                self.get_logger().warn("Observation missing/stale: " + "; ".join(issues))
             self.publish_idle()
             return
-
         state = self.build_state()
         images = self.build_images()
         if state is None or images is None:
             self.publish_idle()
             return
-
         try:
             response = self.worker.request_action(state, images)
         except Exception as exc:
@@ -377,20 +294,17 @@ class HumanNewPickAutoCmdBridge(Node):
                 self.get_logger().warn(f"Worker request failed: {exc}")
             self.publish_idle()
             return
-
         if not response.get("ok"):
             self.worker_error_count += 1
             if self.worker_error_count % self.log_every_n == 1:
                 self.get_logger().warn(f"Worker inference failed: {response.get('error')}")
             self.publish_idle()
             return
-
         action = response["action"]
-        if len(action) != ACTION_DIM or any(not math.isfinite(float(value)) for value in action):
+        if len(action) != ACTION_DIM or any(not math.isfinite(float(v)) for v in action):
             self.get_logger().warn("Worker returned invalid action")
             self.publish_idle()
             return
-
         self.stale_count = 0
         self.worker_error_count = 0
         self.publish_command(action)
@@ -398,26 +312,46 @@ class HumanNewPickAutoCmdBridge(Node):
         if self.infer_count % self.log_every_n == 1:
             latency_s = float(response.get("latency_s", 0.0))
             if self.log_full_action:
-                action_log = format_named_values(ACTION_FIELDS, action)
-                joint_delta = [
-                    float(action_value) - float(state_value)
-                    for action_value, state_value in zip(action[:20], state[:20], strict=False)
-                ]
-                delta_log = format_named_values(ACTION_FIELDS[:20], joint_delta)
                 self.get_logger().info(
-                    f"action[{self.infer_count}] latency={latency_s:.3f}s: {action_log}"
+                    f"action[{self.infer_count}] latency={latency_s:.3f}s: "
+                    f"{format_named_values(ACTION_FIELDS, action)}"
                 )
-                self.get_logger().info(f"joint_delta[{self.infer_count}]: {delta_log}")
             else:
-                sample = format_named_values(ACTION_FIELDS[:6], action[:6])
                 self.get_logger().info(
-                    f"action[{self.infer_count}] latency={latency_s:.3f}s: {sample}, ..."
+                    f"action[{self.infer_count}] latency={latency_s:.3f}s: "
+                    f"{format_named_values(ACTION_FIELDS[:6], action[:6])}, ..."
                 )
+
+
+def parse_args() -> argparse.Namespace:
+    parser = argparse.ArgumentParser(description=f"{ROBOT} ROS2 bridge for ACT policy")
+    parser.add_argument("--worker-host", default="127.0.0.1")
+    parser.add_argument("--worker-port", type=int, default=8764)
+    parser.add_argument("--worker-timeout-s", type=float, default=1.0)
+    parser.add_argument("--publish-commands", action="store_true", help="Publish real robot commands. Default is dry-run.")
+    parser.add_argument("--no-publish-idle-on-stale", dest="publish_idle_on_stale", action="store_false", default=True)
+    parser.add_argument("--control-mode", type=float, default=1.0)
+    parser.add_argument("--rate-hz", type=float, default=20.0)
+    parser.add_argument("--max-obs-age-s", type=float, default=0.5)
+    parser.add_argument("--log-every-n", type=int, default=20)
+    parser.add_argument("--log-full-action", action="store_true")
+    parser.add_argument("--cmd-topic", default="/zeno/h1/auto/wholebody/cmd")
+    parser.add_argument("--head-cam-topic", default="/zeno/h1/sensor/head_cam/image/compressed")
+    parser.add_argument("--left-arm-cam-topic", default="/zeno/h1/sensor/left_arm_cam/image/compressed")
+    parser.add_argument("--right-arm-cam-topic", default="/zeno/h1/sensor/right_arm_cam/image/compressed")
+    parser.add_argument("--odom-topic", default="/zeno/h1/sensor/odom_raw")
+    parser.add_argument("--torso-state-topic", default="/zeno/h1/wheelarm/torso/joint_state")
+    parser.add_argument("--left-arm-state-topic", default="/zeno/h1/wheelarm/left_arm/joint_state")
+    parser.add_argument("--right-arm-state-topic", default="/zeno/h1/wheelarm/right_arm/joint_state")
+    parser.add_argument("--left-gripper-state-topic", default="/zeno/h1/left_gripper/joint_state")
+    parser.add_argument("--right-gripper-state-topic", default="/zeno/h1/right_gripper/joint_state")
+    return parser.parse_args()
 
 
 def main() -> None:
+    args = parse_args()
     rclpy.init()
-    node = HumanNewPickAutoCmdBridge()
+    node = AutoCmdBridge(args)
     try:
         rclpy.spin(node)
     finally:

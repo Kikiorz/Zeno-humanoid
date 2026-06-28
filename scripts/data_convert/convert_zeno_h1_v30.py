@@ -54,6 +54,7 @@ from pathlib import Path
 
 import cv2
 import numpy as np
+from lerobot.configs.video import VideoEncoderConfig
 from lerobot.datasets.lerobot_dataset import LeRobotDataset
 from rosbags.highlevel import AnyReader
 
@@ -106,6 +107,10 @@ JOINT_NAME_ALIASES = {
 
 FPS = 20
 DEFAULT_IMG_SIZE = 224
+DEFAULT_VIDEO_CODEC = "h264"
+DEFAULT_VIDEO_CRF = 18
+DEFAULT_VIDEO_GOP = 2
+DEFAULT_VIDEO_FAST_DECODE = 1
 
 
 def decode_compressed_image(msg, img_size: tuple[int, int]) -> np.ndarray | None:
@@ -522,9 +527,44 @@ def main() -> None:
     )
     parser.add_argument(
         "--vcodec",
+        "--video-codec",
+        dest="video_codec",
+        type=str,
+        default=DEFAULT_VIDEO_CODEC,
+        help=(
+            "Video codec for camera MP4s. Use h264 for fast training decode; "
+            "libsvtav1/av1 saves space but is slower to decode."
+        ),
+    )
+    parser.add_argument(
+        "--video-crf",
+        type=float,
+        default=DEFAULT_VIDEO_CRF,
+        help="Video quality. Lower is better/larger. For h264, 18 is visually high quality.",
+    )
+    parser.add_argument(
+        "--video-gop",
+        type=int,
+        default=DEFAULT_VIDEO_GOP,
+        help="Video GOP/keyframe interval. Small values speed random training reads.",
+    )
+    parser.add_argument(
+        "--video-fast-decode",
+        type=int,
+        default=DEFAULT_VIDEO_FAST_DECODE,
+        help="Enable codec fast-decode tuning when supported; 1 is recommended for training.",
+    )
+    parser.add_argument(
+        "--video-preset",
         type=str,
         default=None,
-        help="Optional video codec passed to LeRobotDataset.create",
+        help="Optional codec preset, for example veryfast/fast/medium for h264.",
+    )
+    parser.add_argument(
+        "--encoder-threads",
+        type=int,
+        default=None,
+        help="Optional encoder threads passed to LeRobot video encoder.",
     )
     parser.add_argument(
         "--overwrite",
@@ -541,6 +581,10 @@ def main() -> None:
         raise SystemExit("--max-bags must be positive when provided")
     if args.max_frames is not None and args.max_frames <= 0:
         raise SystemExit("--max-frames must be positive when provided")
+    if args.video_gop <= 0:
+        raise SystemExit("--video-gop must be positive")
+    if args.encoder_threads is not None and args.encoder_threads <= 0:
+        raise SystemExit("--encoder-threads must be positive when provided")
 
     img_size = (args.img_size, args.img_size)
     output_path = Path(args.output_dir) / args.repo_name
@@ -559,6 +603,14 @@ def main() -> None:
         return
 
     features = build_features(img_size)
+    camera_encoder = VideoEncoderConfig(
+        vcodec=args.video_codec,
+        pix_fmt="yuv420p",
+        g=args.video_gop,
+        crf=args.video_crf,
+        preset=args.video_preset,
+        fast_decode=args.video_fast_decode,
+    )
     create_kwargs = {
         "repo_id": args.repo_name,
         "root": output_path,
@@ -568,9 +620,9 @@ def main() -> None:
         "use_videos": True,
         "image_writer_threads": 8,
         "image_writer_processes": 4,
+        "camera_encoder": camera_encoder,
+        "encoder_threads": args.encoder_threads,
     }
-    if args.vcodec:
-        create_kwargs["vcodec"] = args.vcodec
 
     dataset = LeRobotDataset.create(**create_kwargs)
 
@@ -583,6 +635,11 @@ def main() -> None:
     print(f"  Bags:     {total_bags}")
     print(f"  FPS:      {args.fps}")
     print(f"  ImgSize:  {img_size}")
+    print(
+        "  Video:    "
+        f"codec={camera_encoder.vcodec}, crf={camera_encoder.crf}, "
+        f"gop={camera_encoder.g}, fast_decode={camera_encoder.fast_decode}"
+    )
     print(f"  Dim:      {dim}D")
     print("  Layout:   /zeno/h1/auto/wholebody/cmd[1..23]")
     print("  Note:     base state uses odom_raw; base action uses twist/cmd")
