@@ -2,7 +2,7 @@
 
 Default checkpoint:
 
-`outputs/train/new_data_act_dinov3_base_frozen_100k_20260629/checkpoints/100000/pretrained_model`
+`outputs/train/robot5_new_act_dinov3_base_frozen_100k_20260629/checkpoints/100000/pretrained_model`
 
 Run two terminals on the robot.
 
@@ -12,6 +12,7 @@ Terminal A, conda inference worker:
 cd /path/to/2027icra/scripts/deploy/robot5_act_dinov3_base_frozen_100k
 conda run --no-capture-output -n lerobot-qrp312 python worker.py
 ```
+
 
 Terminal B, ROS2 bridge:
 

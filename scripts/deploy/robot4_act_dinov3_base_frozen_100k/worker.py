@@ -38,7 +38,7 @@ DEFAULT_CHECKPOINT = (
     REPO_ROOT
     / "outputs"
     / "train"
-    / "new_data_act_dinov3_base_frozen_100k_20260629"
+    / "robot4_new_act_dinov3_base_frozen_100k_20260630"
     / "checkpoints"
     / "100000"
     / "pretrained_model"
