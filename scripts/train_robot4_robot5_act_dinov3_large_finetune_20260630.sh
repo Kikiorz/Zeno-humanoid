@@ -2,7 +2,7 @@
 set -euo pipefail
 
 REPO_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
-CONDA_ENV="${CONDA_ENV:-lerobot-qrp312}"
+CONDA_ENV="${CONDA_ENV-lerobot-qrp312}"
 TRAIN_ENTRY="${REPO_ROOT}/scripts/train_humanmoid_pick_act_dinov2.sh"
 RUN_SUFFIX="${RUN_SUFFIX:-20260630}"
 RUN_PARALLEL="${RUN_PARALLEL:-true}"
@@ -50,6 +50,11 @@ run_train() {
   echo "[$(date '+%F %T')] dataset: ${dataset_repo_id}"
   echo "[$(date '+%F %T')] log: ${log_path}"
 
+  runner=()
+  if [[ -n "${CONDA_ENV}" ]]; then
+    runner=(conda run --no-capture-output -n "${CONDA_ENV}")
+  fi
+
   env \
     "${COMMON_ENV[@]}" \
     DEVICE="${device}" \
@@ -59,7 +64,7 @@ run_train() {
     DATASET_ROOT="${REPO_ROOT}/Data/lerobot/${dataset_repo_id}" \
     OUTPUT_DIR="${REPO_ROOT}/outputs/train/${run_id}" \
     TRAIN_LOG_DIR="${REPO_ROOT}/scripts/train_log/${run_id}" \
-    conda run --no-capture-output -n "${CONDA_ENV}" \
+    "${runner[@]}" \
     bash "${TRAIN_ENTRY}" \
     "$@" \
     2>&1 | tee -a "${log_path}"
