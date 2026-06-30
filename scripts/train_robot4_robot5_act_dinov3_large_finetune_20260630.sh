@@ -38,7 +38,7 @@ COMMON_ENV=(
 run_train() {
   local robot="$1"
   local dataset_repo_id="$2"
-  local device="$3"
+  local cuda_visible_devices="$3"
   shift 3
   local run_id="${robot}_new_act_dinov3_large_finetune_100k_${RUN_SUFFIX}"
   local log_dir="${REPO_ROOT}/outputs/logs"
@@ -46,7 +46,7 @@ run_train() {
 
   mkdir -p "${log_dir}"
 
-  echo "[$(date '+%F %T')] start ${robot}: ${run_id} device=${device}"
+  echo "[$(date '+%F %T')] start ${robot}: ${run_id} cuda_visible_devices=${cuda_visible_devices}"
   echo "[$(date '+%F %T')] dataset: ${dataset_repo_id}"
   echo "[$(date '+%F %T')] log: ${log_path}"
 
@@ -57,7 +57,8 @@ run_train() {
 
   env \
     "${COMMON_ENV[@]}" \
-    DEVICE="${device}" \
+    CUDA_VISIBLE_DEVICES="${cuda_visible_devices}" \
+    DEVICE="cuda" \
     RUN_ID="${run_id}" \
     JOB_NAME="${run_id}" \
     DATASET_REPO_ID="${dataset_repo_id}" \
@@ -74,9 +75,9 @@ run_train() {
 
 if [[ "${RUN_PARALLEL}" == "true" ]]; then
   pids=()
-  run_train robot4 robot4_new_zeno_h1_auto_cmd_v30 cuda:0 "$@" &
+  run_train robot4 robot4_new_zeno_h1_auto_cmd_v30 0 "$@" &
   pids+=("$!")
-  run_train robot5 robot5_new_zeno_h1_auto_cmd_v30 cuda:1 "$@" &
+  run_train robot5 robot5_new_zeno_h1_auto_cmd_v30 1 "$@" &
   pids+=("$!")
 
   status=0
@@ -88,7 +89,7 @@ if [[ "${RUN_PARALLEL}" == "true" ]]; then
   exit "${status}"
 fi
 
-run_train robot4 robot4_new_zeno_h1_auto_cmd_v30 cuda:0 "$@"
-run_train robot5 robot5_new_zeno_h1_auto_cmd_v30 cuda:1 "$@"
+run_train robot4 robot4_new_zeno_h1_auto_cmd_v30 0 "$@"
+run_train robot5 robot5_new_zeno_h1_auto_cmd_v30 1 "$@"
 
 echo "[$(date '+%F %T')] all fine-tuning jobs finished"
