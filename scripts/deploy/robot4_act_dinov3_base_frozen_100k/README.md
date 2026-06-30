@@ -1,5 +1,9 @@
 # robot4 ACT+DINOv3 Base Frozen Deployment
 
+Default checkpoint:
+
+`outputs/train/new_data_act_dinov3_base_frozen_100k_20260629/checkpoints/100000/pretrained_model`
+
 Run two terminals on the robot.
 
 Terminal A, conda inference worker:
