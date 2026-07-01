@@ -1,13 +1,13 @@
-# robot4 ACT+DINOv3 Base Frozen Deployment
+# robot4 ACT+DINOv3 Base FullFT Deployment
 
 Default checkpoint:
 
-`outputs/train/robot4_new_act_dinov3_base_frozen_100k_20260630/checkpoints/100000/pretrained_model`
+`outputs/train/robot4_20260623_act_dinov3_base_fullft/checkpoints/080000/pretrained_model`
 
-This directory is the robot4 deployment entry for the new 2026-06-30 model.
+This directory now defaults to the robot4 2026-06-23 VAST Base FullFT checkpoint.
 It uses a two-process layout:
 
-- `worker.py`: conda inference process, loads ACT + DINOv3 Base from the checkpoint.
+- `worker.py`: conda inference process, loads ACT + DINOv3 from the checkpoint config.
 - `bridge.py`: ROS2 process, subscribes robot observations and publishes the 24-field whole-body command.
 
 Run two terminals on robot4.

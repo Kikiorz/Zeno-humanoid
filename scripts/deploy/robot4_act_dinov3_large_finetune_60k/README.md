@@ -1,13 +1,13 @@
-# robot4 ACT+DINOv3 Large Fine-tuned 60k Deployment
+# robot4 ACT+DINOv3 Base FullFT Deployment
 
 Default checkpoint:
 
-`outputs/train/robot4_new_act_dinov3_large_finetune_60k_20260630/checkpoints/060000/pretrained_model`
+`outputs/train/robot4_20260623_act_dinov3_base_fullft/checkpoints/080000/pretrained_model`
 
-This directory is the robot4 deployment entry for the DINOv3 Large fine-tuned model.
-It uses the same two-process layout as the frozen-base deployment:
+This directory now defaults to the robot4 2026-06-23 VAST Base FullFT checkpoint.
+The directory name is historical; the worker loads architecture details from the checkpoint config.
 
-- `worker.py`: conda inference process, loads ACT + DINOv3 Large from the checkpoint.
+- `worker.py`: conda inference process, loads ACT + DINOv3 from the checkpoint config.
 - `bridge.py`: ROS2 process, subscribes robot observations and publishes the 24-field whole-body command.
 
 Run two terminals on the robot.
@@ -28,7 +28,7 @@ source /opt/ros/humble/setup.bash
 ```
 
 The bridge is dry-run by default. Add `--publish-commands` only when the robot is ready.
-Use `--checkpoint-path` on `worker.py` to test another checkpoint, for example a 40k checkpoint.
+Use `--checkpoint-path` on `worker.py` to test another checkpoint when needed.
 
 The published command is `std_msgs/msg/Float64MultiArray` on `/zeno/h1/auto/wholebody/cmd`:
 

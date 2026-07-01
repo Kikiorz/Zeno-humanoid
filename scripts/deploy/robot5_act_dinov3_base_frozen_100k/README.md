@@ -1,8 +1,10 @@
-# robot5 ACT+DINOv3 Base Frozen Deployment
+# robot5 ACT+DINOv3 Base FullFT Deployment
 
 Default checkpoint:
 
-`outputs/train/robot5_new_act_dinov3_base_frozen_100k_20260629/checkpoints/100000/pretrained_model`
+`outputs/train/robot5_20260623_act_dinov3_base_fullft/checkpoints/080000/pretrained_model`
+
+This directory now defaults to the robot5 2026-06-23 VAST Base FullFT checkpoint.
 
 Run two terminals on the robot.
 

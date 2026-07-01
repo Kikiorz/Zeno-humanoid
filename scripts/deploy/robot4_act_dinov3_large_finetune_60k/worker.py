@@ -38,9 +38,9 @@ DEFAULT_CHECKPOINT = (
     REPO_ROOT
     / "outputs"
     / "train"
-    / "robot4_new_act_dinov3_large_finetune_60k_20260630"
+    / "robot4_20260623_act_dinov3_base_fullft"
     / "checkpoints"
-    / "060000"
+    / "080000"
     / "pretrained_model"
 )
 
