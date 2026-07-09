@@ -43,6 +43,14 @@ Usage:
         --output-dir /home/zeno-rp/2027icra/Data/lerobot \
         --repo-name humanmoid_pick_zeno_h1_auto_cmd_v30 \
         --task humanmoid_pick
+
+    # For runs where the left arm camera was not publishing:
+    python scripts/data_convert/convert_zeno_h1_v30.py \
+        --data-dir /home/zeno-rp/2027icra/Data/2026_07_09 \
+        --output-dir /home/zeno-rp/2027icra/Data/lerobot \
+        --repo-name robot8_20260709_zeno_h1_auto_cmd_v30_head_right \
+        --task robot8_20260709 \
+        --cameras head_cam,right_arm_cam
 """
 
 from __future__ import annotations
@@ -67,6 +75,11 @@ DEFAULT_ROBOT_TYPE = "zeno_h1"
 CAM_HEAD = "/zeno/h1/sensor/head_cam/image/compressed"
 CAM_LEFT_ARM = "/zeno/h1/sensor/left_arm_cam/image/compressed"
 CAM_RIGHT_ARM = "/zeno/h1/sensor/right_arm_cam/image/compressed"
+CAMERA_TOPICS = {
+    "head_cam": CAM_HEAD,
+    "left_arm_cam": CAM_LEFT_ARM,
+    "right_arm_cam": CAM_RIGHT_ARM,
+}
 ODOM = "/zeno/h1/sensor/odom_raw"
 TWIST_CMD = "/zeno/h1/twist/cmd"
 
@@ -194,11 +207,7 @@ def extract_named_positions(msg, expected_names: list[str]) -> np.ndarray:
     return np.array(positions[: len(expected_names)], dtype=np.float32)
 
 
-def enabled_topics() -> list[str]:
-    return [
-        CAM_HEAD,
-        CAM_LEFT_ARM,
-        CAM_RIGHT_ARM,
+ROBOT_TOPICS = [
         ODOM,
         TWIST_CMD,
         STATE_TORSO,
@@ -211,7 +220,28 @@ def enabled_topics() -> list[str]:
         STATE_RIGHT_GRIPPER,
         ACTION_LEFT_GRIPPER,
         ACTION_RIGHT_GRIPPER,
-    ]
+]
+
+
+def parse_camera_names(raw: str) -> list[str]:
+    names = [name.strip() for name in raw.split(",") if name.strip()]
+    if not names:
+        raise SystemExit("--cameras must include at least one camera name")
+
+    unknown = [name for name in names if name not in CAMERA_TOPICS]
+    if unknown:
+        known = ", ".join(CAMERA_TOPICS)
+        raise SystemExit(f"Unknown camera name(s): {unknown}. Known cameras: {known}")
+
+    deduped = []
+    for name in names:
+        if name not in deduped:
+            deduped.append(name)
+    return deduped
+
+
+def enabled_topics(camera_names: list[str]) -> list[str]:
+    return [CAMERA_TOPICS[name] for name in camera_names] + ROBOT_TOPICS
 
 
 def collect_bag_paths(data_dir: str | Path, max_bags: int | None = None) -> list[Path]:
@@ -255,11 +285,11 @@ def vector_names() -> list[str]:
     return list(AUTO_CMD_FIELD_NAMES)
 
 
-def build_features(img_size: tuple[int, int]) -> dict:
+def build_features(img_size: tuple[int, int], camera_names: list[str]) -> dict:
     names = vector_names()
     dim = len(names)
 
-    return {
+    features = {
         "observation.state": {
             "dtype": "float32",
             "shape": (dim,),
@@ -270,22 +300,16 @@ def build_features(img_size: tuple[int, int]) -> dict:
             "shape": (dim,),
             "names": names,
         },
-        "observation.images.head_cam": {
-            "dtype": "video",
-            "shape": (img_size[1], img_size[0], 3),
-            "names": ["height", "width", "channels"],
-        },
-        "observation.images.left_arm_cam": {
-            "dtype": "video",
-            "shape": (img_size[1], img_size[0], 3),
-            "names": ["height", "width", "channels"],
-        },
-        "observation.images.right_arm_cam": {
-            "dtype": "video",
-            "shape": (img_size[1], img_size[0], 3),
-            "names": ["height", "width", "channels"],
-        },
     }
+
+    for camera_name in camera_names:
+        features[f"observation.images.{camera_name}"] = {
+            "dtype": "video",
+            "shape": (img_size[1], img_size[0], 3),
+            "names": ["height", "width", "channels"],
+        }
+
+    return features
 
 
 def process_single_bag(
@@ -296,12 +320,13 @@ def process_single_bag(
     task_label: str,
     fps: int,
     img_size: tuple[int, int],
+    camera_names: list[str],
     center_crop_fraction: float,
     max_frames: int | None,
 ) -> list[dict] | None:
     print(f"\n[Bag {bag_idx}/{total_bags}] Processing: {bag_path}")
     bag_start = time.time()
-    topics = enabled_topics()
+    topics = enabled_topics(camera_names)
     topic_set = set(topics)
 
     try:
@@ -317,9 +342,10 @@ def process_single_bag(
                 topic_to_msgs[conn.topic].append((t, msg))
 
             required = {
-                "head_cam": topic_to_msgs[CAM_HEAD],
-                "left_arm_cam": topic_to_msgs[CAM_LEFT_ARM],
-                "right_arm_cam": topic_to_msgs[CAM_RIGHT_ARM],
+                name: topic_to_msgs[CAMERA_TOPICS[name]] for name in camera_names
+            }
+            required.update(
+                {
                 "odom": topic_to_msgs[ODOM],
                 "twist_cmd": topic_to_msgs[TWIST_CMD],
                 "state_torso": topic_to_msgs[STATE_TORSO],
@@ -332,7 +358,8 @@ def process_single_bag(
                 "state_right_gripper": topic_to_msgs[STATE_RIGHT_GRIPPER],
                 "action_left_gripper": topic_to_msgs[ACTION_LEFT_GRIPPER],
                 "action_right_gripper": topic_to_msgs[ACTION_RIGHT_GRIPPER],
-            }
+                }
+            )
 
             for name, msgs in required.items():
                 if not msgs:
@@ -368,22 +395,20 @@ def process_single_bag(
 
             frames = []
             for t in sample_times:
-                img_head = decode_compressed_image(
-                    topic_to_msgs[CAM_HEAD][nearest_idx(times[CAM_HEAD], t)][1],
-                    img_size,
-                    center_crop_fraction,
-                )
-                img_left = decode_compressed_image(
-                    topic_to_msgs[CAM_LEFT_ARM][nearest_idx(times[CAM_LEFT_ARM], t)][1],
-                    img_size,
-                    center_crop_fraction,
-                )
-                img_right = decode_compressed_image(
-                    topic_to_msgs[CAM_RIGHT_ARM][nearest_idx(times[CAM_RIGHT_ARM], t)][1],
-                    img_size,
-                    center_crop_fraction,
-                )
-                if any(img is None for img in [img_head, img_left, img_right]):
+                frame = {}
+                failed_image = False
+                for camera_name in camera_names:
+                    camera_topic = CAMERA_TOPICS[camera_name]
+                    img = decode_compressed_image(
+                        topic_to_msgs[camera_topic][nearest_idx(times[camera_topic], t)][1],
+                        img_size,
+                        center_crop_fraction,
+                    )
+                    if img is None:
+                        failed_image = True
+                        break
+                    frame[f"observation.images.{camera_name}"] = img
+                if failed_image:
                     continue
 
                 odom_msg = topic_to_msgs[ODOM][nearest_idx(times[ODOM], t)][1]
@@ -468,18 +493,14 @@ def process_single_bag(
                     base_action,
                 ]
 
-                frames.append(
+                frame.update(
                     {
-                        "observation.images.head_cam": img_head,
-                        "observation.images.left_arm_cam": img_left,
-                        "observation.images.right_arm_cam": img_right,
-                        "observation.state": np.concatenate(state_parts).astype(
-                            np.float32
-                        ),
+                        "observation.state": np.concatenate(state_parts).astype(np.float32),
                         "action": np.concatenate(action_parts).astype(np.float32),
                         "task": task_label,
                     }
                 )
+                frames.append(frame)
 
             elapsed = time.time() - bag_start
             print(f"  Done: {len(frames)} frames in {elapsed:.1f}s")
@@ -550,6 +571,15 @@ def main() -> None:
         help=(
             "Keep this centered fraction of original width and height before resize; "
             "1.0 disables cropping"
+        ),
+    )
+    parser.add_argument(
+        "--cameras",
+        type=str,
+        default="head_cam,left_arm_cam,right_arm_cam",
+        help=(
+            "Comma-separated camera names to include. Known names: "
+            "head_cam,left_arm_cam,right_arm_cam"
         ),
     )
     parser.add_argument(
@@ -638,6 +668,7 @@ def main() -> None:
         raise SystemExit("--video-gop must be positive")
     if args.encoder_threads is not None and args.encoder_threads <= 0:
         raise SystemExit("--encoder-threads must be positive when provided")
+    camera_names = parse_camera_names(args.cameras)
 
     if args.img_width is not None and args.img_height is not None:
         img_size = (args.img_width, args.img_height)
@@ -658,7 +689,7 @@ def main() -> None:
         print("No bag paths to process.")
         return
 
-    features = build_features(img_size)
+    features = build_features(img_size, camera_names)
     camera_encoder = VideoEncoderConfig(
         vcodec=args.video_codec,
         pix_fmt="yuv420p",
@@ -700,7 +731,7 @@ def main() -> None:
     print(f"  Dim:      {dim}D")
     print("  Layout:   /zeno/h1/auto/wholebody/cmd[1..23]")
     print("  Note:     base state uses odom_raw; base action uses twist/cmd")
-    print("  Cameras:  head_cam, left_arm_cam, right_arm_cam")
+    print(f"  Cameras:  {', '.join(camera_names)}")
     print(f"{'=' * 60}")
 
     successful = 0
@@ -713,6 +744,7 @@ def main() -> None:
             task_label=task_label,
             fps=args.fps,
             img_size=img_size,
+            camera_names=camera_names,
             center_crop_fraction=args.center_crop_fraction,
             max_frames=args.max_frames,
         )
