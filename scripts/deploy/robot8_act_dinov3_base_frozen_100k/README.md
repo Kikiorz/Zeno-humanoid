@@ -2,10 +2,10 @@
 
 Default checkpoint:
 
-`outputs/train/robot8_20260708_act_dinov3_base_frozen_100k/checkpoints/100000/pretrained_model`
+`outputs/train/robot8_20260708_3cam_act_dinov3_base_frozen_100k_640x480_crop2of3_20260709/checkpoints/100000/pretrained_model`
 
-This directory defaults to the 2026-07-08 robot8 single-robot ACT+DINOv3 Base Frozen checkpoint.
-The `robot8_20260708...` output path is a local symlink to the training run produced from this batch.
+This directory defaults to the 2026-07-08 robot8 ACT+DINOv3 Base Frozen checkpoint
+with head, left-arm, and right-arm cameras.
 It uses a two-process layout:
 
 - `worker.py`: conda inference process, loads ACT + DINOv3 from the checkpoint config.
@@ -28,11 +28,29 @@ source /opt/ros/humble/setup.bash
 /usr/bin/python3 bridge.py
 ```
 
+For the 2026-07-09 head+right model, point the worker at that checkpoint and start the bridge with
+only those two image streams:
+
+```bash
+conda run --no-capture-output -n lerobot-qrp312 python worker.py \
+  --checkpoint-path /home/zeno-rp/2027icra/outputs/train/robot8_20260709_head_right_act_dinov3_base_frozen_100k_640x480_crop2of3_20260709/checkpoints/100000/pretrained_model
+```
+
+```bash
+/usr/bin/python3 bridge.py --cameras head_cam,right_arm_cam
+```
+
 The bridge is dry-run by default. It logs inferred actions but does not publish commands.
 When robot8 is ready, run:
 
 ```bash
 /usr/bin/python3 bridge.py --publish-commands
+```
+
+For the 2026-07-09 head+right model with command publishing:
+
+```bash
+/usr/bin/python3 bridge.py --cameras head_cam,right_arm_cam --publish-commands
 ```
 
 For full action logging during dry-run:

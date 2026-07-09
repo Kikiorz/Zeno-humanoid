@@ -19,7 +19,7 @@ import torch
 ROBOT = "robot8"
 ACTION_DIM = 23
 NORM_EPS = 1e-6
-IMAGE_KEYS = {
+KNOWN_IMAGE_KEYS = {
     "head_cam": "observation.images.head_cam",
     "left_arm_cam": "observation.images.left_arm_cam",
     "right_arm_cam": "observation.images.right_arm_cam",
@@ -38,7 +38,7 @@ DEFAULT_CHECKPOINT = (
     REPO_ROOT
     / "outputs"
     / "train"
-    / "robot8_20260708_act_dinov3_base_frozen_100k"
+    / "robot8_20260708_3cam_act_dinov3_base_frozen_100k_640x480_crop2of3_20260709"
     / "checkpoints"
     / "100000"
     / "pretrained_model"
@@ -116,6 +116,22 @@ def checkpoint_image_size(config: PreTrainedConfig) -> tuple[int, int]:
     return 224, 224
 
 
+def checkpoint_image_keys(config: PreTrainedConfig) -> dict[str, str]:
+    image_keys: dict[str, str] = {}
+    for feature_key, feature in config.input_features.items():
+        feature_type = getattr(feature, "type", None)
+        feature_type_name = getattr(feature_type, "value", feature_type)
+        if feature_type_name != "VISUAL":
+            continue
+        camera_name = feature_key.rsplit(".", maxsplit=1)[-1]
+        if camera_name not in KNOWN_IMAGE_KEYS:
+            raise ValueError(f"unsupported visual feature in checkpoint: {feature_key}")
+        image_keys[camera_name] = feature_key
+    if not image_keys:
+        raise ValueError("checkpoint has no visual input features")
+    return image_keys
+
+
 def decode_image(image_bytes: bytes, image_size: tuple[int, int]) -> np.ndarray | None:
     buffer = np.frombuffer(image_bytes, dtype=np.uint8)
     image_bgr = cv2.imdecode(buffer, cv2.IMREAD_COLOR)
@@ -191,6 +207,7 @@ class ActWorker:
         config = PreTrainedConfig.from_pretrained(checkpoint, local_files_only=True)
         resolved_image_size = image_size or checkpoint_image_size(config)
         self.image_size = (int(resolved_image_size[0]), int(resolved_image_size[1]))
+        self.image_keys = checkpoint_image_keys(config)
         config.device = self.device
         if hasattr(config, "dinov2_pretrained"):
             config.dinov2_pretrained = False
@@ -227,7 +244,7 @@ class ActWorker:
             raise ValueError("state contains NaN or Inf")
 
         observation: dict[str, torch.Tensor] = {"observation.state": torch.from_numpy(state_np)}
-        for image_name, feature_key in IMAGE_KEYS.items():
+        for image_name, feature_key in self.image_keys.items():
             image_bytes = images.get(image_name)
             if not image_bytes:
                 raise ValueError(f"missing image {image_name}")
@@ -305,6 +322,7 @@ def main() -> None:
     clamp_status = "enabled" if worker.clamp_actions and worker.action_bounds is not None else "disabled"
     print(
         f"[{ROBOT} worker] checkpoint={checkpoint}; device={worker.device}; "
+        f"cameras={','.join(worker.image_keys)}; image_size={worker.image_size}; "
         f"n_action_steps={worker.policy.config.n_action_steps}; "
         f"temporal_ensemble_coeff={worker.policy.config.temporal_ensemble_coeff}; "
         f"action_clamp={clamp_status}; listening={args.host}:{args.port}",

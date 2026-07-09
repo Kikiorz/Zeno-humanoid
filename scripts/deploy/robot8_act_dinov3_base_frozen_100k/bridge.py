@@ -44,7 +44,7 @@ JOINT_NAME_ALIASES = {
     "left_gripper": ["left_arm_gripper"],
     "right_gripper": ["right_arm_gripper"],
 }
-IMAGE_NAMES = ["head_cam", "left_arm_cam", "right_arm_cam"]
+DEFAULT_IMAGE_NAMES = ["head_cam", "left_arm_cam", "right_arm_cam"]
 IMAGE_TOPIC_PARAMS = {
     "head_cam": "head_cam_topic",
     "left_arm_cam": "left_arm_cam_topic",
@@ -152,6 +152,7 @@ class WorkerClient:
 class AutoCmdBridge(Node):
     def __init__(self, args: argparse.Namespace) -> None:
         super().__init__(f"{ROBOT}_auto_cmd_bridge")
+        self.image_names = list(args.cameras)
         self.publish_commands = args.publish_commands
         self.publish_idle_on_stale = args.publish_idle_on_stale
         self.control_mode = args.control_mode
@@ -176,7 +177,8 @@ class AutoCmdBridge(Node):
         mode = "PUBLISH" if self.publish_commands else "DRY-RUN"
         self.get_logger().info(
             f"mode={mode}; worker={args.worker_host}:{args.worker_port}; "
-            f"rate={self.rate_hz:.1f}Hz; cmd_topic={args.cmd_topic}"
+            f"rate={self.rate_hz:.1f}Hz; cameras={','.join(self.image_names)}; "
+            f"cmd_topic={args.cmd_topic}"
         )
 
     def destroy_node(self) -> bool:
@@ -184,7 +186,8 @@ class AutoCmdBridge(Node):
         return super().destroy_node()
 
     def create_topic_subscriptions(self) -> None:
-        for name, arg_name in IMAGE_TOPIC_PARAMS.items():
+        for name in self.image_names:
+            arg_name = IMAGE_TOPIC_PARAMS[name]
             self.subscriptions_keepalive.append(
                 self.create_subscription(CompressedImage, self.topics[arg_name], self.image_callback(name), 10)
             )
@@ -214,7 +217,8 @@ class AutoCmdBridge(Node):
     def observation_cache_issues(self) -> list[str]:
         now = time.monotonic()
         issues = []
-        for name, arg_name in IMAGE_TOPIC_PARAMS.items():
+        for name in self.image_names:
+            arg_name = IMAGE_TOPIC_PARAMS[name]
             cached = self.image_cache.get(name)
             if cached is None:
                 issues.append(f"{name} missing topic={self.topics[arg_name]}")
@@ -253,7 +257,7 @@ class AutoCmdBridge(Node):
 
     def build_images(self) -> dict[str, bytes] | None:
         images = {}
-        for name in IMAGE_NAMES:
+        for name in self.image_names:
             cached = self.image_cache.get(name)
             if cached is None:
                 return None
@@ -323,6 +327,22 @@ class AutoCmdBridge(Node):
                 )
 
 
+def parse_camera_names(value: str | Sequence[str]) -> list[str]:
+    if isinstance(value, str):
+        names = [name.strip() for name in value.split(",") if name.strip()]
+    else:
+        names = list(value)
+    if not names:
+        raise argparse.ArgumentTypeError("at least one camera is required")
+    unknown = [name for name in names if name not in IMAGE_TOPIC_PARAMS]
+    if unknown:
+        supported = ",".join(IMAGE_TOPIC_PARAMS)
+        raise argparse.ArgumentTypeError(f"unsupported camera(s): {','.join(unknown)}; supported: {supported}")
+    if len(set(names)) != len(names):
+        raise argparse.ArgumentTypeError("duplicate camera names are not allowed")
+    return names
+
+
 def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(description=f"{ROBOT} ROS2 bridge for ACT policy")
     parser.add_argument("--worker-host", default="127.0.0.1")
@@ -335,6 +355,12 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--max-obs-age-s", type=float, default=0.5)
     parser.add_argument("--log-every-n", type=int, default=20)
     parser.add_argument("--log-full-action", action="store_true")
+    parser.add_argument(
+        "--cameras",
+        type=parse_camera_names,
+        default=list(DEFAULT_IMAGE_NAMES),
+        help="Comma-separated cameras to send to the worker: head_cam,left_arm_cam,right_arm_cam",
+    )
     parser.add_argument("--cmd-topic", default="/zeno/h1/auto/wholebody/cmd")
     parser.add_argument("--head-cam-topic", default="/zeno/h1/sensor/head_cam/image/compressed")
     parser.add_argument("--left-arm-cam-topic", default="/zeno/h1/sensor/left_arm_cam/image/compressed")
