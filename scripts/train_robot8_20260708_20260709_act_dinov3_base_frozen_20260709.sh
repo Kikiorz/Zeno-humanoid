@@ -88,7 +88,7 @@ if [[ "${RUN_PARALLEL}" == "true" ]]; then
   pids=()
   run_train \
     "20260708_3cam" \
-    "robot8_20260708_zeno_h1_auto_cmd_v30_640x480_crop2of3_3cam" \
+    "robot8_20260708_zeno_h1_auto_cmd_v30_center_crop_2of3_640x480" \
     0 &
   pids+=("$!")
 
@@ -109,7 +109,7 @@ fi
 
 run_train \
   "20260708_3cam" \
-  "robot8_20260708_zeno_h1_auto_cmd_v30_640x480_crop2of3_3cam" \
+  "robot8_20260708_zeno_h1_auto_cmd_v30_center_crop_2of3_640x480" \
   0
 run_train \
   "20260709_head_right" \

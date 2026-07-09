@@ -51,7 +51,7 @@ convert_one() {
 
 convert_one \
   "${REPO_ROOT}/Data/2026_07_08" \
-  "robot8_20260708_zeno_h1_auto_cmd_v30_640x480_crop2of3_3cam" \
+  "robot8_20260708_zeno_h1_auto_cmd_v30_center_crop_2of3_640x480" \
   "robot8_20260708" \
   "head_cam,left_arm_cam,right_arm_cam"
 
