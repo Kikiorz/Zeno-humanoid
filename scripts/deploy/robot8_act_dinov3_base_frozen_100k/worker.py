@@ -102,13 +102,27 @@ def resolve_checkpoint(path: str | None) -> Path:
     raise FileNotFoundError(f"model.safetensors not found under: {candidate}")
 
 
-def decode_image(image_bytes: bytes, image_size: int) -> np.ndarray | None:
+def checkpoint_image_size(config: PreTrainedConfig) -> tuple[int, int]:
+    for feature in config.input_features.values():
+        feature_type = getattr(feature, "type", None)
+        feature_type_name = getattr(feature_type, "value", feature_type)
+        if feature_type_name != "VISUAL":
+            continue
+        shape = tuple(int(v) for v in feature.shape)
+        if len(shape) != 3:
+            continue
+        _, height, width = shape
+        return width, height
+    return 224, 224
+
+
+def decode_image(image_bytes: bytes, image_size: tuple[int, int]) -> np.ndarray | None:
     buffer = np.frombuffer(image_bytes, dtype=np.uint8)
     image_bgr = cv2.imdecode(buffer, cv2.IMREAD_COLOR)
     if image_bgr is None:
         return None
     image_rgb = cv2.cvtColor(image_bgr, cv2.COLOR_BGR2RGB)
-    image_rgb = cv2.resize(image_rgb, (image_size, image_size), interpolation=cv2.INTER_LINEAR)
+    image_rgb = cv2.resize(image_rgb, image_size, interpolation=cv2.INTER_LINEAR)
     image = image_rgb.astype(np.float32) / 255.0
     return np.transpose(image, (2, 0, 1))
 
@@ -150,12 +164,18 @@ def load_action_bounds(checkpoint: Path, margin: float) -> tuple[np.ndarray, np.
     return None
 
 
+def optional_float(value: str) -> float | None:
+    if value.lower() in {"none", "off", "false", "null"}:
+        return None
+    return float(value)
+
+
 class ActWorker:
     def __init__(
         self,
         checkpoint: Path,
         device: str | None,
-        image_size: int,
+        image_size: tuple[int, int] | None,
         use_amp: bool,
         clamp_actions: bool,
         action_clip_margin: float,
@@ -164,12 +184,13 @@ class ActWorker:
     ) -> None:
         self.checkpoint = checkpoint
         self.device = device or ("cuda" if torch.cuda.is_available() else "cpu")
-        self.image_size = image_size
         self.use_amp = use_amp
         self.clamp_actions = clamp_actions
         self.action_bounds = load_action_bounds(checkpoint, action_clip_margin)
 
         config = PreTrainedConfig.from_pretrained(checkpoint, local_files_only=True)
+        resolved_image_size = image_size or checkpoint_image_size(config)
+        self.image_size = (int(resolved_image_size[0]), int(resolved_image_size[1]))
         config.device = self.device
         if hasattr(config, "dinov2_pretrained"):
             config.dinov2_pretrained = False
@@ -238,14 +259,21 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--port", type=int, default=8768)
     parser.add_argument("--checkpoint-path", default=str(DEFAULT_CHECKPOINT))
     parser.add_argument("--device", default=None)
-    parser.add_argument("--image-size", type=int, default=224)
+    parser.add_argument(
+        "--image-size",
+        type=int,
+        nargs=2,
+        metavar=("WIDTH", "HEIGHT"),
+        default=None,
+        help="Optional override for image resize size; defaults to checkpoint input shape",
+    )
     parser.add_argument("--use-amp", dest="use_amp", action="store_true", default=True)
     parser.add_argument("--no-use-amp", dest="use_amp", action="store_false")
     parser.add_argument("--clamp-actions", dest="clamp_actions", action="store_true", default=True)
     parser.add_argument("--no-clamp-actions", dest="clamp_actions", action="store_false")
     parser.add_argument("--action-clip-margin", type=float, default=0.05)
-    parser.add_argument("--n-action-steps", type=int, default=None)
-    parser.add_argument("--temporal-ensemble-coeff", type=float, default=None)
+    parser.add_argument("--n-action-steps", type=int, default=1)
+    parser.add_argument("--temporal-ensemble-coeff", type=optional_float, default=0.01)
     return parser.parse_args()
 
 

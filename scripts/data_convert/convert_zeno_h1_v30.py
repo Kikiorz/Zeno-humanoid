@@ -113,11 +113,28 @@ DEFAULT_VIDEO_GOP = 2
 DEFAULT_VIDEO_FAST_DECODE = 1
 
 
-def decode_compressed_image(msg, img_size: tuple[int, int]) -> np.ndarray | None:
+def center_crop_image(img: np.ndarray, fraction: float) -> np.ndarray:
+    if fraction >= 1.0:
+        return img
+
+    height, width = img.shape[:2]
+    crop_width = max(1, min(width, int(round(width * fraction))))
+    crop_height = max(1, min(height, int(round(height * fraction))))
+    x0 = (width - crop_width) // 2
+    y0 = (height - crop_height) // 2
+    return img[y0 : y0 + crop_height, x0 : x0 + crop_width]
+
+
+def decode_compressed_image(
+    msg,
+    img_size: tuple[int, int],
+    center_crop_fraction: float = 1.0,
+) -> np.ndarray | None:
     arr = np.frombuffer(msg.data, dtype=np.uint8)
     img_bgr = cv2.imdecode(arr, cv2.IMREAD_COLOR)
     if img_bgr is None:
         return None
+    img_bgr = center_crop_image(img_bgr, center_crop_fraction)
     img_rgb = cv2.cvtColor(img_bgr, cv2.COLOR_BGR2RGB)
     return cv2.resize(img_rgb, img_size, interpolation=cv2.INTER_LINEAR)
 
@@ -279,6 +296,7 @@ def process_single_bag(
     task_label: str,
     fps: int,
     img_size: tuple[int, int],
+    center_crop_fraction: float,
     max_frames: int | None,
 ) -> list[dict] | None:
     print(f"\n[Bag {bag_idx}/{total_bags}] Processing: {bag_path}")
@@ -353,14 +371,17 @@ def process_single_bag(
                 img_head = decode_compressed_image(
                     topic_to_msgs[CAM_HEAD][nearest_idx(times[CAM_HEAD], t)][1],
                     img_size,
+                    center_crop_fraction,
                 )
                 img_left = decode_compressed_image(
                     topic_to_msgs[CAM_LEFT_ARM][nearest_idx(times[CAM_LEFT_ARM], t)][1],
                     img_size,
+                    center_crop_fraction,
                 )
                 img_right = decode_compressed_image(
                     topic_to_msgs[CAM_RIGHT_ARM][nearest_idx(times[CAM_RIGHT_ARM], t)][1],
                     img_size,
+                    center_crop_fraction,
                 )
                 if any(img is None for img in [img_head, img_left, img_right]):
                     continue
@@ -505,7 +526,31 @@ def main() -> None:
         "--img-size",
         type=int,
         default=DEFAULT_IMG_SIZE,
-        help="Resize images to img-size x img-size",
+        help=(
+            "Resize images to img-size x img-size unless --img-width/--img-height "
+            "are provided"
+        ),
+    )
+    parser.add_argument(
+        "--img-width",
+        type=int,
+        default=None,
+        help="Resize images to this width; use with --img-height for non-square output",
+    )
+    parser.add_argument(
+        "--img-height",
+        type=int,
+        default=None,
+        help="Resize images to this height; use with --img-width for non-square output",
+    )
+    parser.add_argument(
+        "--center-crop-fraction",
+        type=float,
+        default=1.0,
+        help=(
+            "Keep this centered fraction of original width and height before resize; "
+            "1.0 disables cropping"
+        ),
     )
     parser.add_argument(
         "--max-bags",
@@ -577,6 +622,14 @@ def main() -> None:
         raise SystemExit("--fps must be positive")
     if args.img_size <= 0:
         raise SystemExit("--img-size must be positive")
+    if (args.img_width is None) != (args.img_height is None):
+        raise SystemExit("--img-width and --img-height must be provided together")
+    if args.img_width is not None and args.img_width <= 0:
+        raise SystemExit("--img-width must be positive")
+    if args.img_height is not None and args.img_height <= 0:
+        raise SystemExit("--img-height must be positive")
+    if not (0 < args.center_crop_fraction <= 1.0):
+        raise SystemExit("--center-crop-fraction must be in the range (0, 1]")
     if args.max_bags is not None and args.max_bags <= 0:
         raise SystemExit("--max-bags must be positive when provided")
     if args.max_frames is not None and args.max_frames <= 0:
@@ -586,7 +639,10 @@ def main() -> None:
     if args.encoder_threads is not None and args.encoder_threads <= 0:
         raise SystemExit("--encoder-threads must be positive when provided")
 
-    img_size = (args.img_size, args.img_size)
+    if args.img_width is not None and args.img_height is not None:
+        img_size = (args.img_width, args.img_height)
+    else:
+        img_size = (args.img_size, args.img_size)
     output_path = Path(args.output_dir) / args.repo_name
 
     if output_path.exists():
@@ -635,6 +691,7 @@ def main() -> None:
     print(f"  Bags:     {total_bags}")
     print(f"  FPS:      {args.fps}")
     print(f"  ImgSize:  {img_size}")
+    print(f"  Crop:     center fraction={args.center_crop_fraction}")
     print(
         "  Video:    "
         f"codec={camera_encoder.vcodec}, crf={camera_encoder.crf}, "
@@ -656,6 +713,7 @@ def main() -> None:
             task_label=task_label,
             fps=args.fps,
             img_size=img_size,
+            center_crop_fraction=args.center_crop_fraction,
             max_frames=args.max_frames,
         )
         if result is not None:
