@@ -6,6 +6,7 @@ this specific model:
 
 - checkpoint: `outputs/train/robot8_20260709_head_right_act_dinov3_base_frozen_100k_640x480_crop2of3_20260709/checkpoints/020000/pretrained_model`
 - cameras: `head_cam,right_arm_cam`
+- state/action: full 23D whole-body vector, including left arm and left gripper
 - mode: dry-run unless `--publish-commands` is passed to `bridge.py`
 
 Terminal A, conda inference worker:
@@ -22,6 +23,10 @@ cd /home/zeno-rp/2027icra/scripts/deploy/robot8_20260709_head_right_act_dinov3_b
 source /opt/ros/humble/setup.bash
 /usr/bin/python3 bridge.py --log-full-action
 ```
+
+This bridge intentionally does not subscribe to `left_arm_cam`. It still
+subscribes to left arm and left gripper state topics and publishes the model's
+full 23D action unchanged.
 
 When robot8 is ready to receive commands:
 
