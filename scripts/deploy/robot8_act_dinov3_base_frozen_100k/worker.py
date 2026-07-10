@@ -132,11 +132,23 @@ def checkpoint_image_keys(config: PreTrainedConfig) -> dict[str, str]:
     return image_keys
 
 
-def decode_image(image_bytes: bytes, image_size: tuple[int, int]) -> np.ndarray | None:
+def center_crop_image(image: np.ndarray, fraction: float) -> np.ndarray:
+    if fraction >= 1.0:
+        return image
+    height, width = image.shape[:2]
+    crop_width = max(1, min(width, int(round(width * fraction))))
+    crop_height = max(1, min(height, int(round(height * fraction))))
+    x0 = (width - crop_width) // 2
+    y0 = (height - crop_height) // 2
+    return image[y0 : y0 + crop_height, x0 : x0 + crop_width]
+
+
+def decode_image(image_bytes: bytes, image_size: tuple[int, int], center_crop_fraction: float) -> np.ndarray | None:
     buffer = np.frombuffer(image_bytes, dtype=np.uint8)
     image_bgr = cv2.imdecode(buffer, cv2.IMREAD_COLOR)
     if image_bgr is None:
         return None
+    image_bgr = center_crop_image(image_bgr, center_crop_fraction)
     image_rgb = cv2.cvtColor(image_bgr, cv2.COLOR_BGR2RGB)
     image_rgb = cv2.resize(image_rgb, image_size, interpolation=cv2.INTER_LINEAR)
     image = image_rgb.astype(np.float32) / 255.0
@@ -192,6 +204,7 @@ class ActWorker:
         checkpoint: Path,
         device: str | None,
         image_size: tuple[int, int] | None,
+        center_crop_fraction: float,
         use_amp: bool,
         clamp_actions: bool,
         action_clip_margin: float,
@@ -207,6 +220,7 @@ class ActWorker:
         config = PreTrainedConfig.from_pretrained(checkpoint, local_files_only=True)
         resolved_image_size = image_size or checkpoint_image_size(config)
         self.image_size = (int(resolved_image_size[0]), int(resolved_image_size[1]))
+        self.center_crop_fraction = center_crop_fraction
         self.image_keys = checkpoint_image_keys(config)
         config.device = self.device
         if hasattr(config, "dinov2_pretrained"):
@@ -248,7 +262,7 @@ class ActWorker:
             image_bytes = images.get(image_name)
             if not image_bytes:
                 raise ValueError(f"missing image {image_name}")
-            image = decode_image(image_bytes, self.image_size)
+            image = decode_image(image_bytes, self.image_size, self.center_crop_fraction)
             if image is None:
                 raise ValueError(f"failed to decode image {image_name}")
             observation[feature_key] = torch.from_numpy(image)
@@ -284,6 +298,12 @@ def parse_args() -> argparse.Namespace:
         default=None,
         help="Optional override for image resize size; defaults to checkpoint input shape",
     )
+    parser.add_argument(
+        "--center-crop-fraction",
+        type=float,
+        default=1.0,
+        help="Center crop fraction before resize. Use 0.6666667 for crop2of3 checkpoints.",
+    )
     parser.add_argument("--use-amp", dest="use_amp", action="store_true", default=True)
     parser.add_argument("--no-use-amp", dest="use_amp", action="store_false")
     parser.add_argument("--clamp-actions", dest="clamp_actions", action="store_true", default=True)
@@ -308,11 +328,14 @@ def serve_client(client: socket.socket, worker: ActWorker) -> None:
 
 def main() -> None:
     args = parse_args()
+    if not (0 < args.center_crop_fraction <= 1.0):
+        raise SystemExit("--center-crop-fraction must be in the range (0, 1]")
     checkpoint = resolve_checkpoint(args.checkpoint_path)
     worker = ActWorker(
         checkpoint,
         args.device,
         args.image_size,
+        args.center_crop_fraction,
         args.use_amp,
         args.clamp_actions,
         args.action_clip_margin,
@@ -323,6 +346,7 @@ def main() -> None:
     print(
         f"[{ROBOT} worker] checkpoint={checkpoint}; device={worker.device}; "
         f"cameras={','.join(worker.image_keys)}; image_size={worker.image_size}; "
+        f"center_crop_fraction={worker.center_crop_fraction}; "
         f"n_action_steps={worker.policy.config.n_action_steps}; "
         f"temporal_ensemble_coeff={worker.policy.config.temporal_ensemble_coeff}; "
         f"action_clamp={clamp_status}; listening={args.host}:{args.port}",

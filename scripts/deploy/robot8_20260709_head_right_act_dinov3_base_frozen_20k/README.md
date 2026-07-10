@@ -6,6 +6,7 @@ this specific model:
 
 - checkpoint: `outputs/train/robot8_20260709_head_right_act_dinov3_base_frozen_100k_640x480_crop2of3_20260709/checkpoints/020000/pretrained_model`
 - cameras: `head_cam,right_arm_cam`
+- image preprocessing: center crop `2/3`, then resize to checkpoint input size `640x480`
 - state/action: full 23D whole-body vector, including left arm and left gripper
 - mode: dry-run unless `--publish-commands` is passed to `bridge.py`
 

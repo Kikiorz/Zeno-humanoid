@@ -8,6 +8,7 @@ from pathlib import Path
 
 REPO_ROOT = Path(__file__).resolve().parents[3]
 BASE_WORKER = REPO_ROOT / "scripts" / "deploy" / "robot8_act_dinov3_base_frozen_100k" / "worker.py"
+DEFAULT_CENTER_CROP_FRACTION = "0.6666667"
 DEFAULT_CHECKPOINT = (
     REPO_ROOT
     / "outputs"
@@ -22,6 +23,8 @@ DEFAULT_CHECKPOINT = (
 def main() -> None:
     if not any(arg == "--checkpoint-path" or arg.startswith("--checkpoint-path=") for arg in sys.argv):
         sys.argv.extend(["--checkpoint-path", str(DEFAULT_CHECKPOINT)])
+    if not any(arg == "--center-crop-fraction" or arg.startswith("--center-crop-fraction=") for arg in sys.argv):
+        sys.argv.extend(["--center-crop-fraction", DEFAULT_CENTER_CROP_FRACTION])
     runpy.run_path(str(BASE_WORKER), run_name="__main__")
 
 
