@@ -332,7 +332,7 @@ def parse_args() -> argparse.Namespace:
     )
     parser.add_argument("--worker-host", default="127.0.0.1")
     parser.add_argument("--worker-port", type=int, default=8768)
-    parser.add_argument("--worker-timeout-s", type=float, default=1.0)
+    parser.add_argument("--worker-timeout-s", type=float, default=5.0)
     parser.add_argument("--publish-commands", action="store_true", help="Publish real robot commands. Default is dry-run.")
     parser.add_argument("--no-publish-idle-on-stale", dest="publish_idle_on_stale", action="store_false", default=True)
     parser.add_argument("--control-mode", type=float, default=1.0)

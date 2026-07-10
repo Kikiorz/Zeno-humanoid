@@ -74,11 +74,10 @@ Default inference behavior:
 - `worker_port=8768`
 - `use_amp=true`
 - action clamp is enabled from checkpoint action min/max with `0.05` margin
-- `n_action_steps=1`
-- temporal ensemble is enabled by default with `temporal_ensemble_coeff=0.01`
+- `n_action_steps` and `temporal_ensemble_coeff` default to the checkpoint config
 
-To reproduce the original open-loop ACT chunking behavior, override the worker:
+To test temporal ensembling, override the worker explicitly:
 
 ```bash
-conda run --no-capture-output -n lerobot-qrp312 python worker.py --n-action-steps 100 --temporal-ensemble-coeff none
+conda run --no-capture-output -n lerobot-qrp312 python worker.py --n-action-steps 1 --temporal-ensemble-coeff 0.01
 ```

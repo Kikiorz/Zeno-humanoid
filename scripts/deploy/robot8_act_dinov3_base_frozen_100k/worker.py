@@ -309,8 +309,8 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--clamp-actions", dest="clamp_actions", action="store_true", default=True)
     parser.add_argument("--no-clamp-actions", dest="clamp_actions", action="store_false")
     parser.add_argument("--action-clip-margin", type=float, default=0.05)
-    parser.add_argument("--n-action-steps", type=int, default=1)
-    parser.add_argument("--temporal-ensemble-coeff", type=optional_float, default=0.01)
+    parser.add_argument("--n-action-steps", type=int, default=None)
+    parser.add_argument("--temporal-ensemble-coeff", type=optional_float, default=None)
     return parser.parse_args()
 
 

@@ -8,6 +8,8 @@ this specific model:
 - cameras: `head_cam,right_arm_cam`
 - image preprocessing: center crop `2/3`, then resize to checkpoint input size `640x480`
 - state/action: full 23D whole-body vector, including left arm and left gripper
+- ACT action mode: defaults to checkpoint config (`n_action_steps=100`, no temporal ensemble)
+- worker timeout: `5s`
 - mode: dry-run unless `--publish-commands` is passed to `bridge.py`
 
 Terminal A, conda inference worker:
