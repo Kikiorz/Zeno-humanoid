@@ -244,21 +244,52 @@ def enabled_topics(camera_names: list[str]) -> list[str]:
     return [CAMERA_TOPICS[name] for name in camera_names] + ROBOT_TOPICS
 
 
-def collect_bag_paths(data_dir: str | Path, max_bags: int | None = None) -> list[Path]:
+def bag_name(path: Path) -> str:
+    return path.parent.name if path.is_file() else path.name
+
+
+def collect_bag_paths(
+    data_dir: str | Path,
+    max_bags: int | None = None,
+    exclude_bags: set[str] | None = None,
+) -> list[Path]:
     data_path = Path(data_dir)
     if not data_path.exists():
         print(f"Error: data directory not found: {data_path}")
         return []
 
-    if (data_path / "metadata.yaml").exists():
+    if data_path.is_file():
+        bag_paths = [data_path]
+    elif (data_path / "metadata.yaml").exists():
         bag_paths = [data_path]
     else:
-        bag_paths = sorted({path.parent for path in data_path.rglob("metadata.yaml")})
-
-    if not bag_paths:
-        bag_paths = sorted(data_path.rglob("*.mcap"))
+        metadata_dirs = {path.parent for path in data_path.rglob("metadata.yaml")}
+        standalone_mcaps = {
+            path
+            for path in data_path.rglob("*.mcap")
+            if path.parent not in metadata_dirs
+        }
+        bag_paths = sorted(
+            [*metadata_dirs, *standalone_mcaps],
+            key=lambda path: str(path),
+        )
     if not bag_paths:
         bag_paths = sorted(data_path.rglob("*.bag"))
+
+    if exclude_bags:
+        discovered_names = {bag_name(path) for path in bag_paths}
+        unknown_exclusions = sorted(exclude_bags - discovered_names)
+        if unknown_exclusions:
+            print(
+                "Warning: requested exclusions were not found: "
+                + ", ".join(unknown_exclusions)
+            )
+        for path in bag_paths:
+            if bag_name(path) in exclude_bags:
+                print(f"Excluding bag: {bag_name(path)}")
+        bag_paths = [
+            path for path in bag_paths if bag_name(path) not in exclude_bags
+        ]
 
     if max_bags is not None:
         bag_paths = bag_paths[:max_bags]
@@ -589,6 +620,15 @@ def main() -> None:
         help="Optional limit on number of bags to convert",
     )
     parser.add_argument(
+        "--exclude-bags",
+        type=str,
+        default="",
+        help=(
+            "Comma-separated bag directory names to exclude after data inspection, "
+            "for example rosbag2_..._a,rosbag2_..._b"
+        ),
+    )
+    parser.add_argument(
         "--max-frames",
         type=int,
         default=None,
@@ -669,6 +709,9 @@ def main() -> None:
     if args.encoder_threads is not None and args.encoder_threads <= 0:
         raise SystemExit("--encoder-threads must be positive when provided")
     camera_names = parse_camera_names(args.cameras)
+    exclude_bags = {
+        name.strip() for name in args.exclude_bags.split(",") if name.strip()
+    }
 
     if args.img_width is not None and args.img_height is not None:
         img_size = (args.img_width, args.img_height)
@@ -683,7 +726,11 @@ def main() -> None:
             )
         shutil.rmtree(output_path)
 
-    bag_paths = collect_bag_paths(args.data_dir, max_bags=args.max_bags)
+    bag_paths = collect_bag_paths(
+        args.data_dir,
+        max_bags=args.max_bags,
+        exclude_bags=exclude_bags,
+    )
     total_bags = len(bag_paths)
     if total_bags == 0:
         print("No bag paths to process.")
