@@ -425,6 +425,7 @@ def process_single_bag(
             )
 
             frames = []
+            dropped_images = 0
             for t in sample_times:
                 frame = {}
                 failed_image = False
@@ -440,6 +441,7 @@ def process_single_bag(
                         break
                     frame[f"observation.images.{camera_name}"] = img
                 if failed_image:
+                    dropped_images += 1
                     continue
 
                 odom_msg = topic_to_msgs[ODOM][nearest_idx(times[ODOM], t)][1]
@@ -534,7 +536,10 @@ def process_single_bag(
                 frames.append(frame)
 
             elapsed = time.time() - bag_start
-            print(f"  Done: {len(frames)} frames in {elapsed:.1f}s")
+            print(
+                f"  Done: {len(frames)} frames in {elapsed:.1f}s; "
+                f"dropped-images={dropped_images}"
+            )
             return frames if frames else None
 
     except Exception as exc:

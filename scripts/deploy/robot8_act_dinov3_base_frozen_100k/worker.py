@@ -340,6 +340,7 @@ def main() -> None:
     if not (0 < args.center_crop_fraction <= 1.0):
         raise SystemExit("--center-crop-fraction must be in the range (0, 1]")
     checkpoint = resolve_checkpoint(args.checkpoint_path)
+    args.temporal_ensemble_coeff=None
     worker = ActWorker(
         checkpoint,
         args.device,

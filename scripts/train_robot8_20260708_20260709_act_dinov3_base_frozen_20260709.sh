@@ -10,6 +10,13 @@ TRAIN_ENTRY="${REPO_ROOT}/scripts/train_humanmoid_pick_act_dinov2.sh"
 RUN_SUFFIX="${RUN_SUFFIX:-20260709}"
 RUN_PARALLEL="${RUN_PARALLEL:-true}"
 BATCH_CANDIDATES="${BATCH_CANDIDATES:-32 24 16 8}"
+# Supplying both variables runs one selected dataset instead of the two
+# historical Robot8 datasets below.  This lets the TUI reuse this exact
+# recipe while preserving its OOM batch-size fallback.
+SELECTED_DATASET_REPO_ID="${DATASET_REPO_ID:-}"
+SELECTED_DATASET_ROOT="${DATASET_ROOT:-}"
+SELECTED_MODEL_TAG="${MODEL_TAG:-tui_3cam}"
+SELECTED_CUDA_VISIBLE_DEVICES="${CUDA_VISIBLE_DEVICES:-0}"
 
 export PYTHONPATH="${REPO_ROOT}/third_party/lerobot/src:${PYTHONPATH:-}"
 export HF_HOME="${HF_HOME:-${REPO_ROOT}/.hf_home}"
@@ -36,6 +43,7 @@ run_train() {
   local model_tag="$1"
   local dataset_repo_id="$2"
   local cuda_visible_devices="$3"
+  local dataset_root="$4"
   local run_id="robot8_${model_tag}_act_dinov3_base_frozen_100k_640x480_crop2of3_${RUN_SUFFIX}"
   local log_dir="${REPO_ROOT}/outputs/logs"
 
@@ -60,7 +68,7 @@ run_train() {
       RUN_ID="${run_id}" \
       JOB_NAME="${run_id}" \
       DATASET_REPO_ID="${dataset_repo_id}" \
-      DATASET_ROOT="${REPO_ROOT}/Data/lerobot/${dataset_repo_id}" \
+      DATASET_ROOT="${dataset_root}" \
       OUTPUT_DIR="${REPO_ROOT}/outputs/train/${run_id}" \
       TRAIN_LOG_DIR="${REPO_ROOT}/scripts/train_log/${run_id}" \
       "${runner[@]}" \
@@ -84,18 +92,34 @@ run_train() {
   return 1
 }
 
+if [[ -n "${SELECTED_DATASET_REPO_ID}" ]]; then
+  if [[ -z "${SELECTED_DATASET_ROOT}" ]]; then
+    echo "DATASET_ROOT is required when DATASET_REPO_ID selects a custom dataset." >&2
+    exit 2
+  fi
+
+  run_train \
+    "${SELECTED_MODEL_TAG}" \
+    "${SELECTED_DATASET_REPO_ID}" \
+    "${SELECTED_CUDA_VISIBLE_DEVICES}" \
+    "${SELECTED_DATASET_ROOT}"
+  exit $?
+fi
+
 if [[ "${RUN_PARALLEL}" == "true" ]]; then
   pids=()
   run_train \
     "20260708_3cam" \
     "robot8_20260708_zeno_h1_auto_cmd_v30_center_crop_2of3_640x480" \
-    0 &
+    0 \
+    "${REPO_ROOT}/Data/lerobot/robot8_20260708_zeno_h1_auto_cmd_v30_center_crop_2of3_640x480" &
   pids+=("$!")
 
   run_train \
     "20260709_head_right" \
     "robot8_20260709_zeno_h1_auto_cmd_v30_640x480_crop2of3_head_right" \
-    1 &
+    1 \
+    "${REPO_ROOT}/Data/lerobot/robot8_20260709_zeno_h1_auto_cmd_v30_640x480_crop2of3_head_right" &
   pids+=("$!")
 
   status=0
@@ -110,10 +134,12 @@ fi
 run_train \
   "20260708_3cam" \
   "robot8_20260708_zeno_h1_auto_cmd_v30_center_crop_2of3_640x480" \
-  0
+  0 \
+  "${REPO_ROOT}/Data/lerobot/robot8_20260708_zeno_h1_auto_cmd_v30_center_crop_2of3_640x480"
 run_train \
   "20260709_head_right" \
   "robot8_20260709_zeno_h1_auto_cmd_v30_640x480_crop2of3_head_right" \
-  1
+  1 \
+  "${REPO_ROOT}/Data/lerobot/robot8_20260709_zeno_h1_auto_cmd_v30_640x480_crop2of3_head_right"
 
 echo "[$(date '+%F %T')] all robot8 training jobs finished"

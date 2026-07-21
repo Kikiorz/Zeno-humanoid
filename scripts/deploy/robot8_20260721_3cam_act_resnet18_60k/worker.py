@@ -15,7 +15,7 @@ DEFAULT_CHECKPOINT = (
     / "train"
     / "robot8_20260721_act_resnet18_60k_224x224_crop2of3"
     / "checkpoints"
-    / "060000"
+    / "020000"
     / "pretrained_model"
 )
 
