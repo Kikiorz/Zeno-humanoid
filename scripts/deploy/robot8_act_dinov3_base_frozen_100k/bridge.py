@@ -40,6 +40,7 @@ ACTION_FIELDS = (
     + RIGHT_GRIPPER_FIELDS
     + ["base_vx", "base_vy", "base_rotation"]
 )
+ACTION_FIELD_TO_INDEX = {name: index for index, name in enumerate(ACTION_FIELDS)}
 JOINT_NAME_ALIASES = {
     "head_pan": ["torso_head_pan"],
     "head_tilt": ["torso_head_tilt"],
@@ -162,6 +163,10 @@ class AutoCmdBridge(Node):
         self.max_obs_age_s = args.max_obs_age_s
         self.log_every_n = max(1, args.log_every_n)
         self.log_full_action = args.log_full_action
+        self.frozen_action_fields = tuple(args.frozen_fields)
+        self.frozen_action_indices = tuple(
+            ACTION_FIELD_TO_INDEX[field] for field in self.frozen_action_fields
+        )
         self.worker = WorkerClient(args.worker_host, args.worker_port, args.worker_timeout_s)
         self.topics = vars(args)
 
@@ -180,6 +185,7 @@ class AutoCmdBridge(Node):
         self.get_logger().info(
             f"mode={mode}; worker={args.worker_host}:{args.worker_port}; "
             f"rate={self.rate_hz:.1f}Hz; cameras={','.join(self.image_names)}; "
+            f"frozen_fields={','.join(self.frozen_action_fields) if self.frozen_action_fields else 'none'}; "
             f"cmd_topic={args.cmd_topic}"
         )
 
@@ -255,7 +261,12 @@ class AutoCmdBridge(Node):
         if self.odom_cache is None:
             return None
         state.extend(odom_velocity(self.odom_cache[0]))
-        if len(state) != ACTION_DIM or any(not math.isfinite(v) for v in state):
+        if len(state) != ACTION_DIM:
+            self.get_logger().warn(f"Invalid state length={len(state)}")
+            return None
+        for index in self.frozen_action_indices:
+            state[index] = 0.0
+        if any(not math.isfinite(v) for v in state):
             self.get_logger().warn(f"Invalid state length={len(state)}")
             return None
         return state
@@ -270,9 +281,14 @@ class AutoCmdBridge(Node):
         return images
 
     def publish_command(self, action: Sequence[float], control_mode: float | None = None) -> None:
+        action_values = [float(value) for value in action]
+        if len(action_values) != ACTION_DIM:
+            raise ValueError(f"action length must be {ACTION_DIM}, got {len(action_values)}")
+        for index in self.frozen_action_indices:
+            action_values[index] = 0.0
         command = [0.0] * COMMAND_DIM
         command[0] = self.control_mode if control_mode is None else float(control_mode)
-        command[1:] = [float(value) for value in action]
+        command[1:] = action_values
         msg = Float64MultiArray()
         msg.data = command
         if self.publish_commands:
@@ -327,12 +343,19 @@ class AutoCmdBridge(Node):
             )
         except (TypeError, ValueError):
             action_values = []
-        if len(action_values) != ACTION_DIM or any(not math.isfinite(value) for value in action_values):
+        if len(action_values) != ACTION_DIM:
             self.get_logger().warn("Worker returned invalid action")
             self.worker.close()
             self.publish_idle()
             return
         action = action_values
+        for index in self.frozen_action_indices:
+            action[index] = 0.0
+        if any(not math.isfinite(value) for value in action):
+            self.get_logger().warn("Worker returned invalid action")
+            self.worker.close()
+            self.publish_idle()
+            return
 
         # The timer callback waits synchronously for inference, so cached ROS
         # observations can become stale while the worker is running.  Recheck
@@ -384,6 +407,17 @@ def parse_camera_names(value: str | Sequence[str]) -> list[str]:
     return names
 
 
+def parse_frozen_fields(value: str) -> tuple[str, ...]:
+    names = [name.strip() for name in value.split(",") if name.strip()]
+    unknown = [name for name in names if name not in ACTION_FIELD_TO_INDEX]
+    if unknown:
+        supported = ",".join(ACTION_FIELDS)
+        raise argparse.ArgumentTypeError(
+            f"unsupported frozen field(s): {','.join(unknown)}; supported: {supported}"
+        )
+    return tuple(dict.fromkeys(names))
+
+
 def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(description=f"{ROBOT} ROS2 bridge for ACT policy")
     parser.add_argument("--worker-host", default="127.0.0.1")
@@ -396,6 +430,12 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--max-obs-age-s", type=float, default=0.5)
     parser.add_argument("--log-every-n", type=int, default=20)
     parser.add_argument("--log-full-action", action="store_true")
+    parser.add_argument(
+        "--frozen-fields",
+        type=parse_frozen_fields,
+        default=(),
+        help="Comma-separated 23D state/action fields forced to zero; e.g. torso_lift,torso_waist",
+    )
     parser.add_argument(
         "--cameras",
         type=parse_camera_names,

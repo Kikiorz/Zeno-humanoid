@@ -110,6 +110,9 @@ AUTO_CMD_FIELD_NAMES = (
     + RIGHT_GRIPPER_NAMES
     + BASE_NAMES
 )
+AUTO_CMD_FIELD_TO_INDEX = {
+    field_name: index for index, field_name in enumerate(AUTO_CMD_FIELD_NAMES)
+}
 
 JOINT_NAME_ALIASES = {
     "head_pan": ["torso_head_pan"],
@@ -240,6 +243,22 @@ def parse_camera_names(raw: str) -> list[str]:
     return deduped
 
 
+def parse_vector_field_names(raw: str) -> list[str]:
+    """Parse optional 23D state/action fields that should be held at zero.
+
+    Keeping the vector shape intact is important: existing ACT checkpoints,
+    normalizers, and the robot bridge all use the fixed 23D command ABI.  A
+    frozen field is therefore represented by a zero value rather than by
+    removing a dimension.
+    """
+    names = [name.strip() for name in raw.split(",") if name.strip()]
+    unknown = [name for name in names if name not in AUTO_CMD_FIELD_TO_INDEX]
+    if unknown:
+        known = ", ".join(AUTO_CMD_FIELD_NAMES)
+        raise SystemExit(f"Unknown --frozen-fields value(s): {unknown}. Known fields: {known}")
+    return list(dict.fromkeys(names))
+
+
 def enabled_topics(camera_names: list[str]) -> list[str]:
     return [CAMERA_TOPICS[name] for name in camera_names] + ROBOT_TOPICS
 
@@ -260,10 +279,19 @@ def collect_bag_paths(
 
     if data_path.is_file():
         bag_paths = [data_path]
-    elif (data_path / "metadata.yaml").exists():
+    elif (
+        (data_path / "metadata.yaml").is_file()
+        and (data_path / "metadata.yaml").stat().st_size > 0
+    ):
         bag_paths = [data_path]
     else:
-        metadata_dirs = {path.parent for path in data_path.rglob("metadata.yaml")}
+        # An interrupted rosbag may leave an empty metadata.yaml next to a valid
+        # MCAP. AnyReader cannot open that directory, so fall back to the MCAP.
+        metadata_dirs = {
+            path.parent
+            for path in data_path.rglob("metadata.yaml")
+            if path.is_file() and path.stat().st_size > 0
+        }
         standalone_mcaps = {
             path
             for path in data_path.rglob("*.mcap")
@@ -290,6 +318,15 @@ def collect_bag_paths(
         bag_paths = [
             path for path in bag_paths if bag_name(path) not in exclude_bags
         ]
+
+    empty_files = [
+        path for path in bag_paths if path.is_file() and path.stat().st_size == 0
+    ]
+    for path in empty_files:
+        print(f"Skipping empty bag file: {path}")
+    if empty_files:
+        empty_set = set(empty_files)
+        bag_paths = [path for path in bag_paths if path not in empty_set]
 
     if max_bags is not None:
         bag_paths = bag_paths[:max_bags]
@@ -354,6 +391,7 @@ def process_single_bag(
     camera_names: list[str],
     center_crop_fraction: float,
     max_frames: int | None,
+    frozen_indices: tuple[int, ...],
 ) -> list[dict] | None:
     print(f"\n[Bag {bag_idx}/{total_bags}] Processing: {bag_path}")
     bag_start = time.time()
@@ -526,10 +564,16 @@ def process_single_bag(
                     base_action,
                 ]
 
+                state = np.concatenate(state_parts).astype(np.float32)
+                action = np.concatenate(action_parts).astype(np.float32)
+                if frozen_indices:
+                    state[list(frozen_indices)] = 0.0
+                    action[list(frozen_indices)] = 0.0
+
                 frame.update(
                     {
-                        "observation.state": np.concatenate(state_parts).astype(np.float32),
-                        "action": np.concatenate(action_parts).astype(np.float32),
+                        "observation.state": state,
+                        "action": action,
                         "task": task_label,
                     }
                 )
@@ -616,6 +660,15 @@ def main() -> None:
         help=(
             "Comma-separated camera names to include. Known names: "
             "head_cam,left_arm_cam,right_arm_cam"
+        ),
+    )
+    parser.add_argument(
+        "--frozen-fields",
+        type=str,
+        default="",
+        help=(
+            "Comma-separated 23D state/action fields to set to zero in the generated dataset. "
+            "Example: torso_lift,torso_waist"
         ),
     )
     parser.add_argument(
@@ -714,6 +767,8 @@ def main() -> None:
     if args.encoder_threads is not None and args.encoder_threads <= 0:
         raise SystemExit("--encoder-threads must be positive when provided")
     camera_names = parse_camera_names(args.cameras)
+    frozen_fields = parse_vector_field_names(args.frozen_fields)
+    frozen_indices = tuple(AUTO_CMD_FIELD_TO_INDEX[name] for name in frozen_fields)
     exclude_bags = {
         name.strip() for name in args.exclude_bags.split(",") if name.strip()
     }
@@ -738,8 +793,7 @@ def main() -> None:
     )
     total_bags = len(bag_paths)
     if total_bags == 0:
-        print("No bag paths to process.")
-        return
+        raise SystemExit("No non-empty bag paths to process.")
 
     features = build_features(img_size, camera_names)
     camera_encoder = VideoEncoderConfig(
@@ -784,9 +838,11 @@ def main() -> None:
     print("  Layout:   /zeno/h1/auto/wholebody/cmd[1..23]")
     print("  Note:     base state uses odom_raw; base action uses twist/cmd")
     print(f"  Cameras:  {', '.join(camera_names)}")
+    print(f"  Frozen:   {', '.join(frozen_fields) if frozen_fields else 'none'}")
     print(f"{'=' * 60}")
 
     successful = 0
+    failed_bags = []
     for bag_idx, bag_path in enumerate(bag_paths, 1):
         task_label = resolve_task_label(bag_path, args.task)
         result = process_single_bag(
@@ -799,6 +855,7 @@ def main() -> None:
             camera_names=camera_names,
             center_crop_fraction=args.center_crop_fraction,
             max_frames=args.max_frames,
+            frozen_indices=frozen_indices,
         )
         if result is not None:
             for frame in result:
@@ -806,17 +863,27 @@ def main() -> None:
             dataset.save_episode()
             successful += 1
             print(f"  [Bag {bag_idx}/{total_bags}] Saved episode: task={task_label}")
+        else:
+            failed_bags.append(bag_name(bag_path))
         del result
 
     dataset.finalize()
 
     total_elapsed = time.time() - total_start
+    complete = successful == total_bags
     print(f"\n{'=' * 60}")
-    print("Conversion complete!")
+    print("Conversion complete!" if complete else "Conversion incomplete!")
     print(f"  Episodes: {successful}/{total_bags}")
+    if failed_bags:
+        print(f"  Failed:   {', '.join(failed_bags)}")
     print(f"  Time:     {total_elapsed:.1f}s")
     print(f"  Output:   {output_path}")
     print(f"{'=' * 60}")
+
+    if not complete:
+        raise SystemExit(
+            f"Conversion failed for {len(failed_bags)} of {total_bags} bag(s)."
+        )
 
 
 if __name__ == "__main__":

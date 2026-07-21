@@ -19,6 +19,20 @@ import torch
 ROBOT = "robot8"
 ACTION_DIM = 23
 NORM_EPS = 1e-6
+ACTION_FIELDS = (
+    "torso_lift",
+    "torso_waist",
+    "head_pan",
+    "head_tilt",
+    *(f"left_arm_j{i}" for i in range(7)),
+    *(f"right_arm_j{i}" for i in range(7)),
+    "left_gripper",
+    "right_gripper",
+    "base_vx",
+    "base_vy",
+    "base_rotation",
+)
+ACTION_FIELD_TO_INDEX = {name: index for index, name in enumerate(ACTION_FIELDS)}
 KNOWN_IMAGE_KEYS = {
     "head_cam": "observation.images.head_cam",
     "left_arm_cam": "observation.images.left_arm_cam",
@@ -198,6 +212,16 @@ def optional_float(value: str) -> float | None:
     return float(value)
 
 
+def parse_frozen_fields(raw: str) -> tuple[str, ...]:
+    """Parse 23D command fields that must be zeroed at the worker boundary."""
+    names = [name.strip() for name in raw.split(",") if name.strip()]
+    unknown = [name for name in names if name not in ACTION_FIELD_TO_INDEX]
+    if unknown:
+        known = ", ".join(ACTION_FIELDS)
+        raise ValueError(f"Unknown --frozen-fields value(s): {unknown}. Known fields: {known}")
+    return tuple(dict.fromkeys(names))
+
+
 class ActWorker:
     def __init__(
         self,
@@ -210,11 +234,15 @@ class ActWorker:
         action_clip_margin: float,
         n_action_steps: int | None,
         temporal_ensemble_coeff: float | None,
+        frozen_action_indices: Sequence[int] = (),
     ) -> None:
         self.checkpoint = checkpoint
         self.device = device or ("cuda" if torch.cuda.is_available() else "cpu")
         self.use_amp = use_amp
         self.clamp_actions = clamp_actions
+        self.frozen_action_indices = tuple(sorted(set(int(index) for index in frozen_action_indices)))
+        if any(index < 0 or index >= ACTION_DIM for index in self.frozen_action_indices):
+            raise ValueError(f"frozen action indices must be within [0, {ACTION_DIM - 1}]")
         self.action_bounds = load_action_bounds(checkpoint, action_clip_margin)
 
         config = PreTrainedConfig.from_pretrained(checkpoint, local_files_only=True)
@@ -263,6 +291,13 @@ class ActWorker:
         state_np = np.asarray(state, dtype=np.float32)
         if state_np.shape != (ACTION_DIM,):
             raise ValueError(f"state shape {state_np.shape}, expected {(ACTION_DIM,)}")
+        if self.frozen_action_indices:
+            # Dataset conversion uses the same raw zero convention.  Applying
+            # it before the checkpoint normalizer prevents frozen joint sensor
+            # jitter (or a bad frozen sensor sample) from becoming a model
+            # input.
+            state_np = state_np.copy()
+            state_np[list(self.frozen_action_indices)] = 0.0
         if not np.isfinite(state_np).all():
             raise ValueError("state contains NaN or Inf")
 
@@ -285,6 +320,10 @@ class ActWorker:
         action_np = np.squeeze(action_np).astype(np.float32)
         if action_np.shape != (ACTION_DIM,):
             raise ValueError(f"action shape {action_np.shape}, expected {(ACTION_DIM,)}")
+        if self.frozen_action_indices:
+            # Last model-side safety boundary.  The ROS bridge repeats this
+            # mask immediately before publication as independent protection.
+            action_np[list(self.frozen_action_indices)] = 0.0
         if not np.isfinite(action_np).all():
             raise ValueError("action contains NaN or Inf")
         if self.clamp_actions and self.action_bounds is not None:
@@ -320,6 +359,14 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--action-clip-margin", type=float, default=0.05)
     parser.add_argument("--n-action-steps", type=int, default=None)
     parser.add_argument("--temporal-ensemble-coeff", type=optional_float, default=None)
+    parser.add_argument(
+        "--frozen-fields",
+        default="",
+        help=(
+            "Comma-separated 23D state/action fields forced to zero before model input "
+            "and after model output; e.g. torso_lift,torso_waist"
+        ),
+    )
     return parser.parse_args()
 
 
@@ -339,6 +386,10 @@ def main() -> None:
     args = parse_args()
     if not (0 < args.center_crop_fraction <= 1.0):
         raise SystemExit("--center-crop-fraction must be in the range (0, 1]")
+    try:
+        frozen_fields = parse_frozen_fields(args.frozen_fields)
+    except ValueError as exc:
+        raise SystemExit(str(exc)) from exc
     checkpoint = resolve_checkpoint(args.checkpoint_path)
     args.temporal_ensemble_coeff=None
     worker = ActWorker(
@@ -351,6 +402,7 @@ def main() -> None:
         args.action_clip_margin,
         args.n_action_steps,
         args.temporal_ensemble_coeff,
+        [ACTION_FIELD_TO_INDEX[field] for field in frozen_fields],
     )
     clamp_status = "enabled" if worker.clamp_actions and worker.action_bounds is not None else "disabled"
     print(
@@ -359,6 +411,7 @@ def main() -> None:
         f"center_crop_fraction={worker.center_crop_fraction}; "
         f"n_action_steps={worker.policy.config.n_action_steps}; "
         f"temporal_ensemble_coeff={worker.policy.config.temporal_ensemble_coeff}; "
+        f"frozen_fields={','.join(frozen_fields) if frozen_fields else 'none'}; "
         f"action_clamp={clamp_status}; listening={args.host}:{args.port}",
         flush=True,
     )
