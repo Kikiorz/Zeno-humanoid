@@ -223,11 +223,20 @@ class ActWorker:
         self.center_crop_fraction = center_crop_fraction
         self.image_keys = checkpoint_image_keys(config)
         config.device = self.device
+        # The checkpoint contains the complete vision backbone.  Disable
+        # initializer-only pretrained weights so deployment never needs a
+        # torchvision download (notably for ResNet checkpoints).
+        if hasattr(config, "pretrained_backbone_weights"):
+            config.pretrained_backbone_weights = None
         if hasattr(config, "dinov2_pretrained"):
             config.dinov2_pretrained = False
         if hasattr(config, "dinov2_pretrained_weights"):
             config.dinov2_pretrained_weights = None
         if n_action_steps is not None:
+            if not 1 <= n_action_steps <= int(config.chunk_size):
+                raise ValueError(
+                    f"n_action_steps must be in [1, {config.chunk_size}], got {n_action_steps}"
+                )
             config.n_action_steps = n_action_steps
         if temporal_ensemble_coeff is not None:
             config.temporal_ensemble_coeff = temporal_ensemble_coeff
@@ -285,7 +294,7 @@ class ActWorker:
 
 
 def parse_args() -> argparse.Namespace:
-    parser = argparse.ArgumentParser(description=f"{ROBOT} ACT+DINOv3 inference worker")
+    parser = argparse.ArgumentParser(description=f"{ROBOT} ACT inference worker")
     parser.add_argument("--host", default="127.0.0.1")
     parser.add_argument("--port", type=int, default=8768)
     parser.add_argument("--checkpoint-path", default=str(DEFAULT_CHECKPOINT))
@@ -356,14 +365,19 @@ def main() -> None:
         server.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
         server.bind((args.host, args.port))
         server.listen(1)
-        while True:
-            client, address = server.accept()
-            print(f"[{ROBOT} worker] bridge connected: {address}", flush=True)
-            with client:
-                try:
-                    serve_client(client, worker)
-                except ConnectionError:
-                    print(f"[{ROBOT} worker] bridge disconnected", flush=True)
+        try:
+            while True:
+                client, address = server.accept()
+                print(f"[{ROBOT} worker] bridge connected: {address}", flush=True)
+                with client:
+                    try:
+                        # Do not reuse queued ACT actions after a bridge restart.
+                        worker.policy.reset()
+                        serve_client(client, worker)
+                    except ConnectionError:
+                        print(f"[{ROBOT} worker] bridge disconnected", flush=True)
+        except KeyboardInterrupt:
+            print(f"[{ROBOT} worker] stopped", flush=True)
 
 
 if __name__ == "__main__":

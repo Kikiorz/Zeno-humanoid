@@ -4,6 +4,7 @@ from __future__ import annotations
 import argparse
 import math
 import pickle
+import signal
 import socket
 import struct
 import time
@@ -13,6 +14,7 @@ try:
     import rclpy
     from nav_msgs.msg import Odometry
     from rclpy.node import Node
+    from rclpy.signals import SignalHandlerOptions
     from sensor_msgs.msg import CompressedImage, JointState
     from std_msgs.msg import Float64MultiArray
 except ImportError as exc:
@@ -182,6 +184,9 @@ class AutoCmdBridge(Node):
         )
 
     def destroy_node(self) -> bool:
+        # Best effort: disable whole-body control before tearing down DDS.
+        if rclpy.ok() and self.publish_commands:
+            self.publish_command([0.0] * ACTION_DIM, control_mode=0.0)
         self.worker.close()
         return super().destroy_node()
 
@@ -281,40 +286,76 @@ class AutoCmdBridge(Node):
         issues = self.observation_cache_issues()
         if issues:
             self.stale_count += 1
-            if self.stale_count % self.log_every_n == 1:
+            if (self.stale_count - 1) % self.log_every_n == 0:
                 self.get_logger().warn("Observation missing/stale: " + "; ".join(issues))
+            # Reconnecting makes the worker clear any queued ACT actions.
+            self.worker.close()
             self.publish_idle()
             return
         state = self.build_state()
         images = self.build_images()
         if state is None or images is None:
+            self.worker.close()
             self.publish_idle()
             return
         try:
             response = self.worker.request_action(state, images)
         except Exception as exc:
             self.worker_error_count += 1
-            if self.worker_error_count % self.log_every_n == 1:
+            if (self.worker_error_count - 1) % self.log_every_n == 0:
                 self.get_logger().warn(f"Worker request failed: {exc}")
             self.publish_idle()
             return
-        if not response.get("ok"):
+        if not isinstance(response, dict) or not response.get("ok"):
             self.worker_error_count += 1
-            if self.worker_error_count % self.log_every_n == 1:
-                self.get_logger().warn(f"Worker inference failed: {response.get('error')}")
+            if (self.worker_error_count - 1) % self.log_every_n == 0:
+                error = (
+                    response.get("error")
+                    if isinstance(response, dict)
+                    else f"invalid response type {type(response)}"
+                )
+                self.get_logger().warn(f"Worker inference failed: {error}")
+            self.worker.close()
             self.publish_idle()
             return
-        action = response["action"]
-        if len(action) != ACTION_DIM or any(not math.isfinite(float(v)) for v in action):
+        action = response.get("action")
+        try:
+            action_values = (
+                [float(value) for value in action]
+                if isinstance(action, (list, tuple))
+                else []
+            )
+        except (TypeError, ValueError):
+            action_values = []
+        if len(action_values) != ACTION_DIM or any(not math.isfinite(value) for value in action_values):
             self.get_logger().warn("Worker returned invalid action")
+            self.worker.close()
+            self.publish_idle()
+            return
+        action = action_values
+
+        # The timer callback waits synchronously for inference, so cached ROS
+        # observations can become stale while the worker is running.  Recheck
+        # immediately before publishing and discard the result if that happened.
+        issues = self.observation_cache_issues()
+        if issues:
+            self.stale_count += 1
+            if (self.stale_count - 1) % self.log_every_n == 0:
+                self.get_logger().warn(
+                    "Observation became stale during inference: " + "; ".join(issues)
+                )
+            self.worker.close()
             self.publish_idle()
             return
         self.stale_count = 0
         self.worker_error_count = 0
         self.publish_command(action)
         self.infer_count += 1
-        if self.infer_count % self.log_every_n == 1:
-            latency_s = float(response.get("latency_s", 0.0))
+        if (self.infer_count - 1) % self.log_every_n == 0:
+            try:
+                latency_s = float(response.get("latency_s", 0.0))
+            except (TypeError, ValueError):
+                latency_s = 0.0
             if self.log_full_action:
                 self.get_logger().info(
                     f"action[{self.infer_count}] latency={latency_s:.3f}s: "
@@ -376,13 +417,24 @@ def parse_args() -> argparse.Namespace:
 
 def main() -> None:
     args = parse_args()
-    rclpy.init()
+    # Keep the ROS context alive until our finally block so Ctrl-C/SIGTERM can
+    # publish a best-effort idle command before DDS is torn down.
+    rclpy.init(signal_handler_options=SignalHandlerOptions.NO)
+
+    def stop_handler(_signum, _frame) -> None:
+        raise KeyboardInterrupt
+
+    previous_sigterm = signal.signal(signal.SIGTERM, stop_handler)
     node = AutoCmdBridge(args)
     try:
         rclpy.spin(node)
+    except KeyboardInterrupt:
+        pass
     finally:
         node.destroy_node()
-        rclpy.shutdown()
+        if rclpy.ok():
+            rclpy.shutdown()
+        signal.signal(signal.SIGTERM, previous_sigterm)
 
 
 if __name__ == "__main__":
