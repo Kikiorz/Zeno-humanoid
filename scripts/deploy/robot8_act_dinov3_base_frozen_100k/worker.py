@@ -444,7 +444,6 @@ def main() -> None:
     except ValueError as exc:
         raise SystemExit(str(exc)) from exc
     checkpoint = resolve_checkpoint(args.checkpoint_path)
-    args.temporal_ensemble_coeff=None
     worker = ActWorker(
         checkpoint,
         args.device,
