@@ -10,6 +10,9 @@ REPO_ROOT = Path(__file__).resolve().parents[3]
 BASE_WORKER = REPO_ROOT / "scripts" / "deploy" / "robot8_act_dinov3_base_frozen_100k" / "worker.py"
 DEFAULT_CENTER_CROP_FRACTION = "1.0"
 DEFAULT_FROZEN_FIELDS = "torso_lift,torso_waist"
+# Means from the original, unfrozen 49,876-frame action dataset.  State input
+# remains zero for these fields; only active robot commands use this baseline.
+DEFAULT_FROZEN_ACTION_VALUES = "torso_lift=-0.001354230436173755,torso_waist=-0.06551777579140391"
 DEFAULT_CHECKPOINT = (
     REPO_ROOT
     / "outputs"
@@ -32,6 +35,8 @@ def main() -> None:
         sys.argv.extend(["--center-crop-fraction", DEFAULT_CENTER_CROP_FRACTION])
     if not has_option("--frozen-fields"):
         sys.argv.extend(["--frozen-fields", DEFAULT_FROZEN_FIELDS])
+    if not has_option("--frozen-action-values"):
+        sys.argv.extend(["--frozen-action-values", DEFAULT_FROZEN_ACTION_VALUES])
     if not has_option("--use-amp"):
         sys.argv.append("--use-amp")
     runpy.run_path(str(BASE_WORKER), run_name="__main__")

@@ -12,6 +12,8 @@ DEFAULT_CAMERAS = "head_cam,left_arm_cam,right_arm_cam"
 DEFAULT_RATE_HZ = "20.0"
 DEFAULT_WORKER_TIMEOUT_S = "1.0"
 DEFAULT_FROZEN_FIELDS = "torso_lift,torso_waist"
+# Original (unfrozen) action means; applies only to active output commands.
+DEFAULT_FROZEN_ACTION_VALUES = "torso_lift=-0.001354230436173755,torso_waist=-0.06551777579140391"
 
 
 def has_option(name: str) -> bool:
@@ -27,6 +29,8 @@ def main() -> None:
         sys.argv.extend(["--worker-timeout-s", DEFAULT_WORKER_TIMEOUT_S])
     if not has_option("--frozen-fields"):
         sys.argv.extend(["--frozen-fields", DEFAULT_FROZEN_FIELDS])
+    if not has_option("--frozen-action-values"):
+        sys.argv.extend(["--frozen-action-values", DEFAULT_FROZEN_ACTION_VALUES])
     runpy.run_path(str(BASE_BRIDGE), run_name="__main__")
 
 

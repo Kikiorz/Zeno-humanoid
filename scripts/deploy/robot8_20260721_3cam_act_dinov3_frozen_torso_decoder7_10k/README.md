@@ -5,8 +5,10 @@
 - 输入图像：三相机、640×480、无 crop（`center_crop_fraction=1.0`）
 - 频率：20 Hz
 - 冻结字段：`torso_lift`、`torso_waist`
-- worker 在归一化前将这两个 state 字段置为 `0.0`，模型输出后再次置为 `0.0`
-- bridge 发布前再把 ROS 24D 命令的 `command[1]` 与 `command[2]` 置为 `0.0`；`command[0]` 的 control mode 保持为 `1.0`
+- worker 在归一化前将这两个 **state 输入**置为 `0.0`，与冻结训练数据一致
+- 两个模型未训练的 **active action 输出**固定为原始未冻结数据的 action 均值：`torso_lift=-0.0013542304`、`torso_waist=-0.0655177758`
+- bridge 发布前会再次写入同一组均值，形成独立安全边界；ROS 24D 命令中对应 `command[1]`、`command[2]`，`command[0]` control mode 保持为 `1.0`
+- 当 bridge 发布 idle（control mode `0.0`）时，仍发送全零 action，避免把固定基线用于停机命令
 - worker 默认使用 CUDA AMP 推理
 
 先启动 worker：
@@ -23,4 +25,4 @@ source /opt/ros/humble/setup.bash
 /usr/bin/python3 bridge.py --log-full-action
 ```
 
-确认三路相机、状态、冻结字段均正确后，才显式添加 `--publish-commands`。注意：这里的 `0.0` 是绝对关节命令零位，不是“保持当前位置”。
+确认三路相机、state 输入掩码与固定 action 基线均正确后，才显式添加 `--publish-commands`。注意：固定均值也是绝对关节命令；首次真机使用前应在 dry-run 日志中确认底层关节零位和方向。

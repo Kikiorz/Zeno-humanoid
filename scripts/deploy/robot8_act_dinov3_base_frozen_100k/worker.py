@@ -9,7 +9,7 @@ import struct
 import sys
 import time
 from pathlib import Path
-from typing import Any, Sequence
+from typing import Any, Mapping, Sequence
 
 import cv2
 import numpy as np
@@ -213,13 +213,38 @@ def optional_float(value: str) -> float | None:
 
 
 def parse_frozen_fields(raw: str) -> tuple[str, ...]:
-    """Parse 23D command fields that must be zeroed at the worker boundary."""
+    """Parse state fields that must be zeroed before model inference."""
     names = [name.strip() for name in raw.split(",") if name.strip()]
     unknown = [name for name in names if name not in ACTION_FIELD_TO_INDEX]
     if unknown:
         known = ", ".join(ACTION_FIELDS)
         raise ValueError(f"Unknown --frozen-fields value(s): {unknown}. Known fields: {known}")
     return tuple(dict.fromkeys(names))
+
+
+def parse_frozen_action_values(raw: str) -> dict[str, float]:
+    """Parse fixed active-command values as ``field=value`` comma pairs."""
+    values: dict[str, float] = {}
+    for item in (part.strip() for part in raw.split(",")):
+        if not item:
+            continue
+        if "=" not in item:
+            raise ValueError(
+                "--frozen-action-values entries must use field=value, "
+                f"got {item!r}"
+            )
+        field, raw_value = (part.strip() for part in item.split("=", maxsplit=1))
+        if field not in ACTION_FIELD_TO_INDEX:
+            known = ", ".join(ACTION_FIELDS)
+            raise ValueError(f"Unknown --frozen-action-values field {field!r}. Known fields: {known}")
+        try:
+            value = float(raw_value)
+        except ValueError as exc:
+            raise ValueError(f"Invalid fixed action value for {field!r}: {raw_value!r}") from exc
+        if not np.isfinite(value):
+            raise ValueError(f"Fixed action value for {field!r} must be finite")
+        values[field] = value
+    return values
 
 
 class ActWorker:
@@ -235,6 +260,7 @@ class ActWorker:
         n_action_steps: int | None,
         temporal_ensemble_coeff: float | None,
         frozen_action_indices: Sequence[int] = (),
+        fixed_action_values: Mapping[int, float] | None = None,
     ) -> None:
         self.checkpoint = checkpoint
         self.device = device or ("cuda" if torch.cuda.is_available() else "cpu")
@@ -243,6 +269,15 @@ class ActWorker:
         self.frozen_action_indices = tuple(sorted(set(int(index) for index in frozen_action_indices)))
         if any(index < 0 or index >= ACTION_DIM for index in self.frozen_action_indices):
             raise ValueError(f"frozen action indices must be within [0, {ACTION_DIM - 1}]")
+        self.fixed_action_values = {}
+        for raw_index, raw_value in (fixed_action_values or {}).items():
+            index = int(raw_index)
+            value = float(raw_value)
+            if not 0 <= index < ACTION_DIM:
+                raise ValueError(f"fixed action index must be within [0, {ACTION_DIM - 1}]")
+            if not np.isfinite(value):
+                raise ValueError("fixed action values must be finite")
+            self.fixed_action_values[index] = value
         self.action_bounds = load_action_bounds(checkpoint, action_clip_margin)
 
         config = PreTrainedConfig.from_pretrained(checkpoint, local_files_only=True)
@@ -320,15 +355,24 @@ class ActWorker:
         action_np = np.squeeze(action_np).astype(np.float32)
         if action_np.shape != (ACTION_DIM,):
             raise ValueError(f"action shape {action_np.shape}, expected {(ACTION_DIM,)}")
-        if self.frozen_action_indices:
-            # Last model-side safety boundary.  The ROS bridge repeats this
-            # mask immediately before publication as independent protection.
-            action_np[list(self.frozen_action_indices)] = 0.0
         if not np.isfinite(action_np).all():
             raise ValueError("action contains NaN or Inf")
         if self.clamp_actions and self.action_bounds is not None:
             low, high = self.action_bounds
             action_np = np.clip(action_np, low, high)
+        if self.frozen_action_indices or self.fixed_action_values:
+            # The model never sees the frozen state fields.  Its corresponding
+            # output dimensions are not learned either, so use a fixed raw
+            # command after clamping.  This order is intentional: a frozen
+            # training dimension has min=max=0 and would otherwise clamp a
+            # non-zero deployment baseline back to zero.
+            action_np = action_np.copy()
+            for index in self.frozen_action_indices:
+                action_np[index] = self.fixed_action_values.get(index, 0.0)
+            for index, value in self.fixed_action_values.items():
+                action_np[index] = value
+        if not np.isfinite(action_np).all():
+            raise ValueError("action contains NaN or Inf after fixed-output masking")
         return action_np.astype(float).tolist()
 
 
@@ -363,8 +407,16 @@ def parse_args() -> argparse.Namespace:
         "--frozen-fields",
         default="",
         help=(
-            "Comma-separated 23D state/action fields forced to zero before model input "
-            "and after model output; e.g. torso_lift,torso_waist"
+            "Comma-separated 23D state fields forced to zero before model input; "
+            "e.g. torso_lift,torso_waist"
+        ),
+    )
+    parser.add_argument(
+        "--frozen-action-values",
+        default="",
+        help=(
+            "Fixed active command values for frozen/unmodeled fields as field=value pairs; "
+            "e.g. torso_lift=-0.001,torso_waist=-0.065"
         ),
     )
     return parser.parse_args()
@@ -388,6 +440,7 @@ def main() -> None:
         raise SystemExit("--center-crop-fraction must be in the range (0, 1]")
     try:
         frozen_fields = parse_frozen_fields(args.frozen_fields)
+        fixed_action_values_by_field = parse_frozen_action_values(args.frozen_action_values)
     except ValueError as exc:
         raise SystemExit(str(exc)) from exc
     checkpoint = resolve_checkpoint(args.checkpoint_path)
@@ -402,7 +455,11 @@ def main() -> None:
         args.action_clip_margin,
         args.n_action_steps,
         args.temporal_ensemble_coeff,
-        [ACTION_FIELD_TO_INDEX[field] for field in frozen_fields],
+        frozen_action_indices=[ACTION_FIELD_TO_INDEX[field] for field in frozen_fields],
+        fixed_action_values={
+            ACTION_FIELD_TO_INDEX[field]: value
+            for field, value in fixed_action_values_by_field.items()
+        },
     )
     clamp_status = "enabled" if worker.clamp_actions and worker.action_bounds is not None else "disabled"
     print(
@@ -412,6 +469,7 @@ def main() -> None:
         f"n_action_steps={worker.policy.config.n_action_steps}; "
         f"temporal_ensemble_coeff={worker.policy.config.temporal_ensemble_coeff}; "
         f"frozen_fields={','.join(frozen_fields) if frozen_fields else 'none'}; "
+        f"frozen_action_values={fixed_action_values_by_field or 'none'}; "
         f"action_clamp={clamp_status}; listening={args.host}:{args.port}",
         flush=True,
     )

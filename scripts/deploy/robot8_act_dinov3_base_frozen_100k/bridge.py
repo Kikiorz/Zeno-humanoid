@@ -119,6 +119,35 @@ def format_named_values(names: Sequence[str], values: Sequence[float]) -> str:
     return ", ".join(f"{name}={float(value):.4f}" for name, value in zip(names, values, strict=False))
 
 
+def parse_frozen_action_values(raw: str) -> dict[str, float]:
+    """Parse fixed active-command values as ``field=value`` comma pairs."""
+    values: dict[str, float] = {}
+    for item in (part.strip() for part in raw.split(",")):
+        if not item:
+            continue
+        if "=" not in item:
+            raise argparse.ArgumentTypeError(
+                "--frozen-action-values entries must use field=value, "
+                f"got {item!r}"
+            )
+        field, raw_value = (part.strip() for part in item.split("=", maxsplit=1))
+        if field not in ACTION_FIELD_TO_INDEX:
+            supported = ",".join(ACTION_FIELDS)
+            raise argparse.ArgumentTypeError(
+                f"unsupported --frozen-action-values field {field!r}; supported: {supported}"
+            )
+        try:
+            value = float(raw_value)
+        except ValueError as exc:
+            raise argparse.ArgumentTypeError(
+                f"invalid fixed action value for {field!r}: {raw_value!r}"
+            ) from exc
+        if not math.isfinite(value):
+            raise argparse.ArgumentTypeError(f"fixed action value for {field!r} must be finite")
+        values[field] = value
+    return values
+
+
 class WorkerClient:
     def __init__(self, host: str, port: int, timeout_s: float) -> None:
         self.host = host
@@ -167,6 +196,10 @@ class AutoCmdBridge(Node):
         self.frozen_action_indices = tuple(
             ACTION_FIELD_TO_INDEX[field] for field in self.frozen_action_fields
         )
+        self.fixed_action_values = {
+            ACTION_FIELD_TO_INDEX[field]: value
+            for field, value in (args.frozen_action_values or {}).items()
+        }
         self.worker = WorkerClient(args.worker_host, args.worker_port, args.worker_timeout_s)
         self.topics = vars(args)
 
@@ -186,6 +219,7 @@ class AutoCmdBridge(Node):
             f"mode={mode}; worker={args.worker_host}:{args.worker_port}; "
             f"rate={self.rate_hz:.1f}Hz; cameras={','.join(self.image_names)}; "
             f"frozen_fields={','.join(self.frozen_action_fields) if self.frozen_action_fields else 'none'}; "
+            f"frozen_action_values={args.frozen_action_values or 'none'}; "
             f"cmd_topic={args.cmd_topic}"
         )
 
@@ -284,8 +318,12 @@ class AutoCmdBridge(Node):
         action_values = [float(value) for value in action]
         if len(action_values) != ACTION_DIM:
             raise ValueError(f"action length must be {ACTION_DIM}, got {len(action_values)}")
+        active_command = control_mode is None
         for index in self.frozen_action_indices:
-            action_values[index] = 0.0
+            action_values[index] = self.fixed_action_values.get(index, 0.0) if active_command else 0.0
+        if active_command:
+            for index, value in self.fixed_action_values.items():
+                action_values[index] = value
         command = [0.0] * COMMAND_DIM
         command[0] = self.control_mode if control_mode is None else float(control_mode)
         command[1:] = action_values
@@ -350,7 +388,9 @@ class AutoCmdBridge(Node):
             return
         action = action_values
         for index in self.frozen_action_indices:
-            action[index] = 0.0
+            action[index] = self.fixed_action_values.get(index, 0.0)
+        for index, value in self.fixed_action_values.items():
+            action[index] = value
         if any(not math.isfinite(value) for value in action):
             self.get_logger().warn("Worker returned invalid action")
             self.worker.close()
@@ -434,7 +474,16 @@ def parse_args() -> argparse.Namespace:
         "--frozen-fields",
         type=parse_frozen_fields,
         default=(),
-        help="Comma-separated 23D state/action fields forced to zero; e.g. torso_lift,torso_waist",
+        help="Comma-separated 23D state fields forced to zero before model inference; e.g. torso_lift,torso_waist",
+    )
+    parser.add_argument(
+        "--frozen-action-values",
+        type=parse_frozen_action_values,
+        default=None,
+        help=(
+            "Fixed active command values for frozen/unmodeled fields as field=value pairs; "
+            "e.g. torso_lift=-0.001,torso_waist=-0.065"
+        ),
     )
     parser.add_argument(
         "--cameras",

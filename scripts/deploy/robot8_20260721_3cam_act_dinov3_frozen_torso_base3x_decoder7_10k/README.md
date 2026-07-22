@@ -5,8 +5,9 @@
 - 输入图像：三相机、640×480、无 crop（`center_crop_fraction=1.0`）
 - 频率：20 Hz
 - 冻结字段：`torso_lift`、`torso_waist`
-- worker 和 bridge 都将冻结字段的输入、输出强制为 `0.0`
-- ROS 24D 命令中只冻结 `command[1]` 与 `command[2]`，不会改写 `command[0]` control mode
+- worker 将冻结 state 输入置为 `0.0`，与冻结训练数据完全一致
+- worker 和 bridge 将未训练的 active action 输出固定为原始未冻结数据均值：`torso_lift=-0.0013542304`、`torso_waist=-0.0655177758`
+- ROS 24D 命令中固定的是 `command[1]` 与 `command[2]`；不会改写 `command[0]` control mode。idle（control mode `0.0`）仍使用全零 action
 - worker 默认使用 CUDA AMP 推理
 
 先启动 worker：
@@ -23,4 +24,4 @@ source /opt/ros/humble/setup.bash
 /usr/bin/python3 bridge.py --log-full-action
 ```
 
-确认后才添加 `--publish-commands`。`0.0` 是绝对命令零位，不是当前位置保持。
+确认 state 输入掩码与固定 action 基线后才添加 `--publish-commands`。固定均值也是绝对命令，首次真机使用前请先 dry-run 确认关节零位和方向。
