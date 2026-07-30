@@ -35,6 +35,7 @@ ACTION_FIELDS = (
 ACTION_FIELD_TO_INDEX = {name: index for index, name in enumerate(ACTION_FIELDS)}
 KNOWN_IMAGE_KEYS = {
     "head_cam": "observation.images.head_cam",
+    "head_cam_right": "observation.images.head_cam_right",
     "left_arm_cam": "observation.images.left_arm_cam",
     "right_arm_cam": "observation.images.right_arm_cam",
 }
@@ -43,6 +44,15 @@ REPO_ROOT = Path(__file__).resolve().parents[3]
 LEROBOT_SRC = REPO_ROOT / "third_party" / "lerobot" / "src"
 if str(LEROBOT_SRC) not in sys.path:
     sys.path.insert(0, str(LEROBOT_SRC))
+TOPCAM_PROCESSING_SRC = REPO_ROOT / "scripts" / "data_convert"
+if str(TOPCAM_PROCESSING_SRC) not in sys.path:
+    sys.path.insert(0, str(TOPCAM_PROCESSING_SRC))
+DATA_PROCESS_20260729_CALIBRATION = (
+    REPO_ROOT / "configs" / "calibration" / "top_stereo_calibration_basalt_kb4_compat.json"
+)
+DATA_PROCESS_20260729_PROCESSING = (
+    REPO_ROOT / "configs" / "calibration" / "processing_metadata_centered_crop_1240x620.json"
+)
 
 from lerobot.configs import PreTrainedConfig  # noqa: E402
 from lerobot.policies.factory import get_policy_class, make_pre_post_processors  # noqa: E402
@@ -169,6 +179,41 @@ def decode_image(image_bytes: bytes, image_size: tuple[int, int], center_crop_fr
     return np.transpose(image, (2, 0, 1))
 
 
+def decode_head_stereo_images(
+    image_bytes: bytes,
+    image_size: tuple[int, int],
+    rectifier: Any,
+) -> tuple[np.ndarray, np.ndarray] | None:
+    """Apply the exact training-time independent left/right stereo geometry."""
+    images_rgb = rectifier.decode_and_rectify_pair_rgb(
+        image_bytes,
+        image_size,
+        resize_mode="letterbox",
+    )
+    if images_rgb is None:
+        return None
+    return tuple(
+        np.transpose(image_rgb.astype(np.float32) / 255.0, (2, 0, 1))
+        for image_rgb in images_rgb
+    )
+
+
+def decode_head_stereo_left_image(
+    image_bytes: bytes,
+    image_size: tuple[int, int],
+    rectifier: Any,
+) -> np.ndarray | None:
+    """Apply stereo-aligned geometry but materialize only the left RGB eye."""
+    decode_left = getattr(rectifier, "decode_and_rectify_left_rgb", None)
+    if decode_left is not None:
+        image_rgb = decode_left(image_bytes, image_size, resize_mode="letterbox")
+        if image_rgb is None:
+            return None
+        return np.transpose(image_rgb.astype(np.float32) / 255.0, (2, 0, 1))
+    pair = decode_head_stereo_images(image_bytes, image_size, rectifier)
+    return None if pair is None else pair[0]
+
+
 def set_norm_eps(pipeline: Any) -> None:
     for step in getattr(pipeline, "steps", []):
         if hasattr(step, "eps"):
@@ -261,6 +306,11 @@ class ActWorker:
         temporal_ensemble_coeff: float | None,
         frozen_action_indices: Sequence[int] = (),
         fixed_action_values: Mapping[int, float] | None = None,
+        rectify_head_stereo: bool = False,
+        head_stereo_profile: str = "legacy_data_process",
+        head_stereo_calibration: Path | None = None,
+        head_stereo_processing: Path | None = None,
+        head_stereo_cam_calibration: Path | None = None,
     ) -> None:
         self.checkpoint = checkpoint
         self.device = device or ("cuda" if torch.cuda.is_available() else "cpu")
@@ -285,6 +335,51 @@ class ActWorker:
         self.image_size = (int(resolved_image_size[0]), int(resolved_image_size[1]))
         self.center_crop_fraction = center_crop_fraction
         self.image_keys = checkpoint_image_keys(config)
+        self.head_stereo_rectifier: Any | None = None
+        if rectify_head_stereo:
+            if not {"head_cam", "head_cam_right"}.intersection(self.image_keys):
+                raise ValueError(
+                    "--rectify-head-stereo requires a checkpoint with observation.images.head_cam "
+                    "and/or observation.images.head_cam_right"
+                )
+            if head_stereo_profile in {"legacy_data_process", "data_process_20260729"}:
+                if head_stereo_cam_calibration is not None:
+                    raise ValueError(
+                        "--head-stereo-cam-calibration requires --head-stereo-profile cam_20260729"
+                    )
+                from topcam_stereo_rectify import (
+                    DEFAULT_CALIBRATION,
+                    DEFAULT_PROCESSING,
+                    TopStereoRectifier,
+                )
+
+                if head_stereo_profile == "data_process_20260729":
+                    default_calibration = DATA_PROCESS_20260729_CALIBRATION
+                    default_processing = DATA_PROCESS_20260729_PROCESSING
+                else:
+                    default_calibration = DEFAULT_CALIBRATION
+                    default_processing = DEFAULT_PROCESSING
+                self.head_stereo_rectifier = TopStereoRectifier(
+                    calibration_path=head_stereo_calibration or default_calibration,
+                    processing_path=head_stereo_processing or default_processing,
+                )
+            elif head_stereo_profile == "cam_20260729":
+                if head_stereo_calibration is not None or head_stereo_processing is not None:
+                    raise ValueError(
+                        "--head-stereo-calibration/--head-stereo-processing apply only to "
+                        "--head-stereo-profile data_process_20260729 or legacy_data_process"
+                    )
+                from topcam_stereo_rectify_cam_20260729 import (
+                    DEFAULT_CALIBRATION,
+                    TopStereoRectifier,
+                )
+
+                self.head_stereo_rectifier = TopStereoRectifier(
+                    calibration_path=head_stereo_cam_calibration or DEFAULT_CALIBRATION,
+                )
+            else:
+                raise ValueError(f"unsupported head-stereo profile: {head_stereo_profile!r}")
+        self.head_stereo_profile = head_stereo_profile if self.head_stereo_rectifier is not None else None
         config.device = self.device
         # The checkpoint contains the complete vision backbone.  Disable
         # initializer-only pretrained weights so deployment never needs a
@@ -337,11 +432,34 @@ class ActWorker:
             raise ValueError("state contains NaN or Inf")
 
         observation: dict[str, torch.Tensor] = {"observation.state": torch.from_numpy(state_np)}
+        head_stereo_images: tuple[np.ndarray, np.ndarray] | None = None
+        head_stereo_left_image: np.ndarray | None = None
+        left_topcam_only = "head_cam" in self.image_keys and "head_cam_right" not in self.image_keys
         for image_name, feature_key in self.image_keys.items():
             image_bytes = images.get(image_name)
             if not image_bytes:
                 raise ValueError(f"missing image {image_name}")
-            image = decode_image(image_bytes, self.image_size, self.center_crop_fraction)
+            if image_name in {"head_cam", "head_cam_right"} and self.head_stereo_rectifier is not None:
+                if image_name == "head_cam" and left_topcam_only:
+                    if head_stereo_left_image is None:
+                        head_stereo_left_image = decode_head_stereo_left_image(
+                            image_bytes,
+                            self.image_size,
+                            self.head_stereo_rectifier,
+                        )
+                    image = head_stereo_left_image
+                else:
+                    if head_stereo_images is None:
+                        head_stereo_images = decode_head_stereo_images(
+                            image_bytes,
+                            self.image_size,
+                            self.head_stereo_rectifier,
+                        )
+                    image = None if head_stereo_images is None else (
+                        head_stereo_images[0] if image_name == "head_cam" else head_stereo_images[1]
+                    )
+            else:
+                image = decode_image(image_bytes, self.image_size, self.center_crop_fraction)
             if image is None:
                 raise ValueError(f"failed to decode image {image_name}")
             observation[feature_key] = torch.from_numpy(image)
@@ -395,6 +513,46 @@ def parse_args() -> argparse.Namespace:
         type=float,
         default=1.0,
         help="Center crop fraction before resize. Use 0.6666667 for crop2of3 checkpoints.",
+    )
+    parser.add_argument(
+        "--rectify-head-stereo",
+        action="store_true",
+        help=(
+            "Decode head_cam as the Robot8 2560x720 left|right fisheye pair, "
+            "then apply the same independent left/right rectification, crop, and "
+            "letterbox used for training."
+        ),
+    )
+    parser.add_argument(
+        "--head-stereo-profile",
+        choices=("data_process_20260729", "legacy_data_process", "cam_20260729"),
+        default="legacy_data_process",
+        help=(
+            "Head-camera rectification contract. data_process_20260729 uses the "
+            "exact user-supplied Data/process calibration, alignment, and crop; "
+            "cam_20260729 uses the separate 7/29 NPZ calibration."
+        ),
+    )
+    parser.add_argument(
+        "--head-stereo-calibration",
+        type=Path,
+        default=None,
+        help="Optional top-stereo calibration JSON; defaults to configs/calibration/.",
+    )
+    parser.add_argument(
+        "--head-stereo-processing",
+        type=Path,
+        default=None,
+        help="Optional top-stereo rectification/crop JSON; defaults to configs/calibration/.",
+    )
+    parser.add_argument(
+        "--head-stereo-cam-calibration",
+        type=Path,
+        default=None,
+        help=(
+            "Optional NPZ calibration for --head-stereo-profile cam_20260729; "
+            "defaults to scripts/data_convert/cam/stereo_params_20260729_172611.npz."
+        ),
     )
     parser.add_argument("--use-amp", dest="use_amp", action="store_true", default=True)
     parser.add_argument("--no-use-amp", dest="use_amp", action="store_false")
@@ -459,12 +617,18 @@ def main() -> None:
             ACTION_FIELD_TO_INDEX[field]: value
             for field, value in fixed_action_values_by_field.items()
         },
+        rectify_head_stereo=args.rectify_head_stereo,
+        head_stereo_profile=args.head_stereo_profile,
+        head_stereo_calibration=args.head_stereo_calibration,
+        head_stereo_processing=args.head_stereo_processing,
+        head_stereo_cam_calibration=args.head_stereo_cam_calibration,
     )
     clamp_status = "enabled" if worker.clamp_actions and worker.action_bounds is not None else "disabled"
     print(
         f"[{ROBOT} worker] checkpoint={checkpoint}; device={worker.device}; "
         f"cameras={','.join(worker.image_keys)}; image_size={worker.image_size}; "
         f"center_crop_fraction={worker.center_crop_fraction}; "
+        f"head_stereo_rectification={worker.head_stereo_profile or 'off'}; "
         f"n_action_steps={worker.policy.config.n_action_steps}; "
         f"temporal_ensemble_coeff={worker.policy.config.temporal_ensemble_coeff}; "
         f"frozen_fields={','.join(frozen_fields) if frozen_fields else 'none'}; "

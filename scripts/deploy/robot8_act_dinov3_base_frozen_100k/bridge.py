@@ -53,6 +53,9 @@ JOINT_NAME_ALIASES = {
 DEFAULT_IMAGE_NAMES = ["head_cam", "left_arm_cam", "right_arm_cam"]
 IMAGE_TOPIC_PARAMS = {
     "head_cam": "head_cam_topic",
+    # Both logical head views are derived from the same raw stereo JPEG. The
+    # worker applies the independent calibration maps after receiving it.
+    "head_cam_right": "head_cam_topic",
     "left_arm_cam": "left_arm_cam_topic",
     "right_arm_cam": "right_arm_cam_topic",
 }
@@ -341,10 +344,18 @@ class AutoCmdBridge(Node):
         return super().destroy_node()
 
     def create_topic_subscriptions(self) -> None:
+        # ``head_cam`` and ``head_cam_right`` are two logical inputs derived
+        # from one compressed stereo topic.  Subscribe only once and update
+        # their caches atomically: two independent DDS subscriptions could
+        # otherwise leave the two logical eyes one ROS message apart when a
+        # timer fires between callbacks.
+        image_names_by_topic: dict[str, list[str]] = {}
         for name in self.image_names:
             arg_name = IMAGE_TOPIC_PARAMS[name]
+            image_names_by_topic.setdefault(self.topics[arg_name], []).append(name)
+        for topic, names in image_names_by_topic.items():
             self.subscriptions_keepalive.append(
-                self.create_subscription(CompressedImage, self.topics[arg_name], self.image_callback(name), 10)
+                self.create_subscription(CompressedImage, topic, self.image_callback(names), 10)
             )
         for name, arg_name in JOINT_TOPIC_PARAMS.items():
             self.subscriptions_keepalive.append(
@@ -354,9 +365,12 @@ class AutoCmdBridge(Node):
             self.create_subscription(Odometry, self.topics["odom_topic"], self.odom_callback, 10)
         )
 
-    def image_callback(self, name: str) -> Callable[[CompressedImage], None]:
+    def image_callback(self, names: Sequence[str]) -> Callable[[CompressedImage], None]:
         def callback(msg: CompressedImage) -> None:
-            self.image_cache[name] = (bytes(msg.data), time.monotonic())
+            image_bytes = bytes(msg.data)
+            received_at = time.monotonic()
+            for name in names:
+                self.image_cache[name] = (image_bytes, received_at)
 
         return callback
 
@@ -667,7 +681,10 @@ def parse_args() -> argparse.Namespace:
         "--cameras",
         type=parse_camera_names,
         default=list(DEFAULT_IMAGE_NAMES),
-        help="Comma-separated cameras to send to the worker: head_cam,left_arm_cam,right_arm_cam",
+        help=(
+            "Comma-separated cameras to send to the worker: "
+            "head_cam,head_cam_right,left_arm_cam,right_arm_cam"
+        ),
     )
     parser.add_argument("--cmd-topic", default="/zeno/h1/auto/wholebody/cmd")
     parser.add_argument("--head-cam-topic", default="/zeno/h1/sensor/head_cam/image/compressed")

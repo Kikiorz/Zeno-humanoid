@@ -1,0 +1,126 @@
+================================================================
+鱼眼双目外参标定报告
+================================================================
+模型: OpenCV fisheye（4 参数）
+左目内参: charuco_left_calib_20260729_164020/results/fisheye_params_20260729_164020.npz
+右目内参: charuco_right_calib_20260729_163950/results/fisheye_params_20260729_163950.npz
+图像尺寸: 1280x720
+使用图像对: 43
+剔除图像对: 7
+
+坐标约定: X_right = R * X_left + T
+双目 RMS: 0.215534 px [PASS]
+标称基线: 60.000000 mm
+估计基线 ||T||: 60.472006 mm [PASS]
+基线差值: +0.472006 mm
+垂直误差均值: 0.164226 px
+垂直误差中位数: 0.116331 px [PASS]
+垂直误差 P95: 0.437361 px [PASS]
+垂直误差最大值: 0.991699 px
+综合质量: PASS
+
+旋转向量 (deg): [-0.04397073 -0.15161877 -0.00581935]
+R:
+[[ 9.99996494e-01  1.02582067e-04 -2.64620442e-03]
+ [-1.00551248e-04  9.99999700e-01  7.67567468e-04]
+ [ 2.64628237e-03 -7.67298697e-04  9.99996204e-01]]
+
+T (mm):
+[[-60.40313701]
+ [ -0.11738664]
+ [  2.88283017]]
+
+E:
+[[-2.07660309e-05 -2.88273924e+00 -1.19598964e-01]
+ [ 3.04266382e+00 -4.60515216e-02  6.03952792e+01]
+ [ 1.23459842e-01 -6.04031069e+01 -4.66741120e-02]]
+
+F（兼容近似）:
+[[-9.15623243e-11 -1.26453706e-05  4.08163396e-03]
+ [ 1.33462600e-05 -2.00961326e-07  1.18053517e-01]
+ [-4.61741090e-03 -1.16921595e-01 -3.07349775e+00]]
+说明: 鱼眼畸变像素不服从单个 3x3 基础矩阵；F 仅对应去畸变后的针孔归一化平面。
+
+R1:
+[[ 9.98731299e-01  2.08021674e-03 -5.03136641e-02]
+ [-2.06090573e-03  9.99997781e-01  4.35688146e-04]
+ [ 5.03144588e-02 -3.31443669e-04  9.98733371e-01]]
+
+R2:
+[[ 9.98861151e-01  1.94117330e-03 -4.76721443e-02]
+ [-1.95946958e-03  9.99998023e-01 -3.37064241e-04]
+ [ 4.76713957e-02  4.30092492e-04  9.98862980e-01]]
+
+P1:
+[[367.51569108   0.         877.06920434   0.        ]
+ [  0.         367.51569108 302.12795      0.        ]
+ [  0.           0.           1.           0.        ]]
+
+P2:
+[[ 3.67515691e+02  0.00000000e+00  8.77069204e+02 -2.22244109e+04]
+ [ 0.00000000e+00  3.67515691e+02  3.02127950e+02  0.00000000e+00]
+ [ 0.00000000e+00  0.00000000e+00  1.00000000e+00  0.00000000e+00]]
+
+Q:
+[[ 1.00000000e+00  0.00000000e+00  0.00000000e+00 -8.77069204e+02]
+ [ 0.00000000e+00  1.00000000e+00  0.00000000e+00 -3.02127950e+02]
+ [ 0.00000000e+00  0.00000000e+00  0.00000000e+00  3.67515691e+02]
+ [ 0.00000000e+00  0.00000000e+00  1.65365774e-02 -0.00000000e+00]]
+
+离群筛选记录（逐对垂直误差 P95）:
+  迭代 1: 阈值 1.000000 px, 剔除 stereo_012.jpg, stereo_009.jpg, stereo_011.jpg, stereo_023.jpg, stereo_010.jpg
+  迭代 2: 阈值 1.000000 px, 剔除 无
+
+剔除图像对:
+  stereo_019.jpg: 至少一侧可靠 ChArUco 检测不足: left=11, right=39, 要求 12
+  stereo_021.jpg: 至少一侧可靠 ChArUco 检测不足: left=10, right=25, 要求 12
+  stereo_012.jpg: 第 1 次离群筛选: 垂直误差 P95 15.8020 px > 1.0000 px
+  stereo_009.jpg: 第 1 次离群筛选: 垂直误差 P95 4.9974 px > 1.0000 px
+  stereo_011.jpg: 第 1 次离群筛选: 垂直误差 P95 2.1631 px > 1.0000 px
+  stereo_023.jpg: 第 1 次离群筛选: 垂直误差 P95 1.7250 px > 1.0000 px
+  stereo_010.jpg: 第 1 次离群筛选: 垂直误差 P95 1.0548 px > 1.0000 px
+
+保留图像对逐对误差:
+  stereo_000.jpg: common=59, selected=12, markers(L/R)=40/42, mean=0.113771, median=0.108361, p95=0.227211, max=0.263376 px
+  stereo_001.jpg: common=51, selected=12, markers(L/R)=43/37, mean=0.114261, median=0.079035, p95=0.318753, max=0.437143 px
+  stereo_002.jpg: common=36, selected=12, markers(L/R)=43/33, mean=0.116979, median=0.062498, p95=0.316803, max=0.370902 px
+  stereo_003.jpg: common=19, selected=12, markers(L/R)=30/17, mean=0.204230, median=0.187657, p95=0.450981, max=0.612560 px
+  stereo_004.jpg: common=50, selected=12, markers(L/R)=36/44, mean=0.151735, median=0.121813, p95=0.323777, max=0.453973 px
+  stereo_005.jpg: common=17, selected=12, markers(L/R)=15/29, mean=0.058125, median=0.058470, p95=0.100327, max=0.104182 px
+  stereo_006.jpg: common=35, selected=12, markers(L/R)=24/33, mean=0.105817, median=0.074242, p95=0.236844, max=0.246618 px
+  stereo_007.jpg: common=24, selected=12, markers(L/R)=17/24, mean=0.519726, median=0.511482, p95=0.973809, max=0.991699 px
+  stereo_008.jpg: common=21, selected=12, markers(L/R)=18/21, mean=0.426074, median=0.328903, p95=0.918768, max=0.924575 px
+  stereo_013.jpg: common=70, selected=12, markers(L/R)=44/44, mean=0.071276, median=0.047002, p95=0.194180, max=0.226919 px
+  stereo_014.jpg: common=57, selected=12, markers(L/R)=44/38, mean=0.152970, median=0.135060, p95=0.355855, max=0.382697 px
+  stereo_015.jpg: common=44, selected=12, markers(L/R)=38/37, mean=0.152024, median=0.104846, p95=0.316656, max=0.345326 px
+  stereo_016.jpg: common=32, selected=12, markers(L/R)=29/34, mean=0.084664, median=0.088775, p95=0.184074, max=0.223639 px
+  stereo_017.jpg: common=14, selected=12, markers(L/R)=12/33, mean=0.087656, median=0.040300, p95=0.221267, max=0.260902 px
+  stereo_018.jpg: common=12, selected=12, markers(L/R)=16/27, mean=0.096730, median=0.065751, p95=0.225455, max=0.274030 px
+  stereo_020.jpg: common=16, selected=12, markers(L/R)=13/23, mean=0.173408, median=0.125395, p95=0.420462, max=0.561031 px
+  stereo_022.jpg: common=54, selected=12, markers(L/R)=40/37, mean=0.266126, median=0.251681, p95=0.538883, max=0.630878 px
+  stereo_024.jpg: common=18, selected=12, markers(L/R)=19/15, mean=0.153428, median=0.137868, p95=0.326193, max=0.360134 px
+  stereo_025.jpg: common=21, selected=12, markers(L/R)=27/17, mean=0.157821, median=0.132220, p95=0.347079, max=0.423145 px
+  stereo_026.jpg: common=23, selected=12, markers(L/R)=29/17, mean=0.271567, median=0.289869, p95=0.501000, max=0.546097 px
+  stereo_027.jpg: common=18, selected=12, markers(L/R)=28/15, mean=0.364036, median=0.339461, p95=0.832298, max=0.961176 px
+  stereo_028.jpg: common=27, selected=12, markers(L/R)=31/30, mean=0.209470, median=0.223128, p95=0.341412, max=0.376796 px
+  stereo_029.jpg: common=54, selected=12, markers(L/R)=39/39, mean=0.248702, median=0.281412, p95=0.411076, max=0.415797 px
+  stereo_030.jpg: common=13, selected=12, markers(L/R)=24/27, mean=0.158563, median=0.176563, p95=0.328859, max=0.350719 px
+  stereo_031.jpg: common=24, selected=12, markers(L/R)=24/37, mean=0.132774, median=0.110487, p95=0.294369, max=0.316027 px
+  stereo_032.jpg: common=37, selected=12, markers(L/R)=34/30, mean=0.075212, median=0.042798, p95=0.214538, max=0.232340 px
+  stereo_033.jpg: common=35, selected=12, markers(L/R)=32/43, mean=0.162416, median=0.114441, p95=0.393097, max=0.452000 px
+  stereo_034.jpg: common=25, selected=12, markers(L/R)=26/33, mean=0.135007, median=0.120805, p95=0.316286, max=0.380159 px
+  stereo_035.jpg: common=26, selected=12, markers(L/R)=27/25, mean=0.087258, median=0.069706, p95=0.209379, max=0.264813 px
+  stereo_036.jpg: common=29, selected=12, markers(L/R)=29/28, mean=0.152581, median=0.159749, p95=0.316935, max=0.375903 px
+  stereo_037.jpg: common=34, selected=12, markers(L/R)=31/33, mean=0.160333, median=0.159672, p95=0.274544, max=0.287333 px
+  stereo_038.jpg: common=45, selected=12, markers(L/R)=36/37, mean=0.120833, median=0.099499, p95=0.232252, max=0.255386 px
+  stereo_039.jpg: common=45, selected=12, markers(L/R)=39/30, mean=0.172015, median=0.104738, p95=0.400491, max=0.439661 px
+  stereo_040.jpg: common=34, selected=12, markers(L/R)=27/36, mean=0.101044, median=0.063286, p95=0.230420, max=0.239225 px
+  stereo_041.jpg: common=34, selected=12, markers(L/R)=26/35, mean=0.134374, median=0.115760, p95=0.279480, max=0.394437 px
+  stereo_042.jpg: common=25, selected=12, markers(L/R)=24/34, mean=0.169409, median=0.171955, p95=0.279519, max=0.282732 px
+  stereo_043.jpg: common=35, selected=12, markers(L/R)=32/32, mean=0.166988, median=0.149243, p95=0.337271, max=0.348636 px
+  stereo_044.jpg: common=24, selected=12, markers(L/R)=29/25, mean=0.201565, median=0.168319, p95=0.410441, max=0.483441 px
+  stereo_045.jpg: common=58, selected=12, markers(L/R)=42/38, mean=0.199154, median=0.184921, p95=0.376854, max=0.397367 px
+  stereo_046.jpg: common=15, selected=12, markers(L/R)=16/23, mean=0.157157, median=0.108763, p95=0.441811, max=0.568578 px
+  stereo_047.jpg: common=35, selected=12, markers(L/R)=25/38, mean=0.101706, median=0.100528, p95=0.201847, max=0.220310 px
+  stereo_048.jpg: common=29, selected=12, markers(L/R)=22/35, mean=0.088550, median=0.074354, p95=0.173970, max=0.195704 px
+  stereo_049.jpg: common=64, selected=12, markers(L/R)=43/43, mean=0.084193, median=0.061844, p95=0.250187, max=0.351975 px

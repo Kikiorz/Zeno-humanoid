@@ -56,6 +56,7 @@ Usage:
 from __future__ import annotations
 
 import argparse
+import json
 import shutil
 import time
 from pathlib import Path
@@ -66,17 +67,45 @@ from lerobot.configs.video import VideoEncoderConfig
 from lerobot.datasets.lerobot_dataset import LeRobotDataset
 from rosbags.highlevel import AnyReader
 
+from topcam_stereo_rectify import (
+    DEFAULT_CALIBRATION as DEFAULT_HEAD_STEREO_CALIBRATION,
+    DEFAULT_PROCESSING as DEFAULT_HEAD_STEREO_PROCESSING,
+    TopStereoRectifier as LegacyTopStereoRectifier,
+    TopStereoRectificationError as LegacyTopStereoRectificationError,
+)
+from topcam_stereo_rectify_cam_20260729 import (
+    DEFAULT_CALIBRATION as DEFAULT_HEAD_STEREO_CAM_20260729_CALIBRATION,
+    TopStereoRectifier as Cam20260729TopStereoRectifier,
+    TopStereoRectificationError as Cam20260729TopStereoRectificationError,
+)
+
 
 DEFAULT_DATA_DIR = Path("/home/zeno-rp/2026CoRL/Data/zeno_bag")
 DEFAULT_OUTPUT_DIR = DEFAULT_DATA_DIR.parent
 DEFAULT_REPO_NAME = "zeno_h1_v30"
 DEFAULT_ROBOT_TYPE = "zeno_h1"
+REPO_ROOT = Path(__file__).resolve().parents[2]
+# These checked-in JSON files are byte-identical copies of the user-supplied
+# ``Data/process`` contract for the 2026-07-29 rig.  Keeping the runtime
+# default inside the repository makes a fresh clone deployable while
+# preserving exactly the same geometry.
+DEFAULT_DATA_PROCESS_20260729_CALIBRATION = (
+    REPO_ROOT / "configs" / "calibration" / "top_stereo_calibration_basalt_kb4_compat.json"
+)
+DEFAULT_DATA_PROCESS_20260729_PROCESSING = (
+    REPO_ROOT / "configs" / "calibration" / "processing_metadata_centered_crop_1240x620.json"
+)
 
 CAM_HEAD = "/zeno/h1/sensor/head_cam/image/compressed"
 CAM_LEFT_ARM = "/zeno/h1/sensor/left_arm_cam/image/compressed"
 CAM_RIGHT_ARM = "/zeno/h1/sensor/right_arm_cam/image/compressed"
 CAMERA_TOPICS = {
+    # ``head_cam`` is the calibrated, rectified left eye from the raw
+    # side-by-side stereo topic.  ``head_cam_right`` remains available only
+    # for legacy dual-eye datasets; the 2026-07-29 contract selects the left
+    # eye as the sole topcam model feature after stereo alignment.
     "head_cam": CAM_HEAD,
+    "head_cam_right": CAM_HEAD,
     "left_arm_cam": CAM_LEFT_ARM,
     "right_arm_cam": CAM_RIGHT_ARM,
 }
@@ -153,6 +182,39 @@ def decode_compressed_image(
     img_bgr = center_crop_image(img_bgr, center_crop_fraction)
     img_rgb = cv2.cvtColor(img_bgr, cv2.COLOR_BGR2RGB)
     return cv2.resize(img_rgb, img_size, interpolation=cv2.INTER_LINEAR)
+
+
+def decode_head_stereo_images(
+    msg,
+    img_size: tuple[int, int],
+    rectifier,
+    resize_mode: str,
+) -> tuple[np.ndarray, np.ndarray] | None:
+    """Decode one raw top-stereo JPEG into separate left/right model views.
+
+    This intentionally does not apply ``--center-crop-fraction``.  The fixed
+    rectification crop is the calibrated valid field of view, not a generic
+    legacy crop. ``letterbox`` then preserves that geometry at 640x480.
+    """
+    return rectifier.decode_and_rectify_pair_rgb(
+        msg.data,
+        img_size,
+        resize_mode=resize_mode,
+    )
+
+
+def decode_head_stereo_left_image(
+    msg,
+    img_size: tuple[int, int],
+    rectifier,
+    resize_mode: str,
+) -> np.ndarray | None:
+    """Emit only the left eye after the calibrated stereo-alignment map."""
+    decode_left = getattr(rectifier, "decode_and_rectify_left_rgb", None)
+    if decode_left is not None:
+        return decode_left(msg.data, img_size, resize_mode=resize_mode)
+    pair = rectifier.decode_and_rectify_pair_rgb(msg.data, img_size, resize_mode=resize_mode)
+    return None if pair is None else pair[0]
 
 
 def nearest_idx(times: np.ndarray, t: int) -> int:
@@ -390,6 +452,8 @@ def process_single_bag(
     img_size: tuple[int, int],
     camera_names: list[str],
     center_crop_fraction: float,
+    head_stereo_rectifier: object | None,
+    head_stereo_resize_mode: str,
     max_frames: int | None,
     frozen_indices: tuple[int, ...],
 ) -> list[dict] | None:
@@ -464,16 +528,49 @@ def process_single_bag(
 
             frames = []
             dropped_images = 0
+            left_topcam_only = (
+                "head_cam" in camera_names and "head_cam_right" not in camera_names
+            )
             for t in sample_times:
                 frame = {}
                 failed_image = False
+                head_stereo_images: tuple[np.ndarray, np.ndarray] | None = None
+                head_stereo_left_image: np.ndarray | None = None
                 for camera_name in camera_names:
                     camera_topic = CAMERA_TOPICS[camera_name]
-                    img = decode_compressed_image(
-                        topic_to_msgs[camera_topic][nearest_idx(times[camera_topic], t)][1],
-                        img_size,
-                        center_crop_fraction,
-                    )
+                    image_msg = topic_to_msgs[camera_topic][
+                        nearest_idx(times[camera_topic], t)
+                    ][1]
+                    if camera_name in {"head_cam", "head_cam_right"} and head_stereo_rectifier is not None:
+                        if camera_name == "head_cam" and left_topcam_only:
+                            if head_stereo_left_image is None:
+                                head_stereo_left_image = decode_head_stereo_left_image(
+                                    image_msg,
+                                    img_size,
+                                    head_stereo_rectifier,
+                                    head_stereo_resize_mode,
+                                )
+                            img = head_stereo_left_image
+                        else:
+                            if head_stereo_images is None:
+                                head_stereo_images = decode_head_stereo_images(
+                                    image_msg,
+                                    img_size,
+                                    head_stereo_rectifier,
+                                    head_stereo_resize_mode,
+                                )
+                            if head_stereo_images is None:
+                                img = None
+                            elif camera_name == "head_cam":
+                                img = head_stereo_images[0]
+                            else:
+                                img = head_stereo_images[1]
+                    else:
+                        img = decode_compressed_image(
+                            image_msg,
+                            img_size,
+                            center_crop_fraction,
+                        )
                     if img is None:
                         failed_image = True
                         break
@@ -654,12 +751,70 @@ def main() -> None:
         ),
     )
     parser.add_argument(
+        "--rectify-head-stereo",
+        action="store_true",
+        help=(
+            "Treat head_cam/head_cam_right as the Robot8 2560x720 left|right "
+            "fisheye pair: split and rectify both eyes independently, then emit "
+            "separate calibrated views. This never "
+            "applies generic centre crop to either eye."
+        ),
+    )
+    parser.add_argument(
+        "--head-stereo-profile",
+        choices=("data_process_20260729", "legacy_data_process", "cam_20260729"),
+        default="legacy_data_process",
+        help=(
+            "Rectification contract. data_process_20260729 is the exact "
+            "user-supplied Data/process JSON contract; cam_20260729 uses the "
+            "separate NPZ calibration. legacy_data_process is retained only for "
+            "backward-compatible older datasets."
+        ),
+    )
+    parser.add_argument(
+        "--head-stereo-resize-mode",
+        choices=("letterbox", "stretch"),
+        default="letterbox",
+        help=(
+            "Post-rectification resize for model input. letterbox preserves the "
+            "selected calibrated aspect ratio without crop; stretch is only for "
+            "legacy compatibility."
+        ),
+    )
+    parser.add_argument(
+        "--head-stereo-calibration",
+        type=Path,
+        default=None,
+        help=(
+            "Optional top-stereo calibration JSON. Defaults to "
+            "configs/calibration/top_stereo_calibration_basalt_kb4_compat.json."
+        ),
+    )
+    parser.add_argument(
+        "--head-stereo-processing",
+        type=Path,
+        default=None,
+        help=(
+            "Optional top-stereo rectification/crop JSON. Defaults to "
+            "configs/calibration/processing_metadata_centered_crop_1240x620.json."
+        ),
+    )
+    parser.add_argument(
+        "--head-stereo-cam-calibration",
+        type=Path,
+        default=None,
+        help=(
+            "Optional NPZ calibration for --head-stereo-profile cam_20260729. "
+            "Defaults to scripts/data_convert/cam/stereo_params_20260729_172611.npz."
+        ),
+    )
+    parser.add_argument(
         "--cameras",
         type=str,
         default="head_cam,left_arm_cam,right_arm_cam",
         help=(
             "Comma-separated camera names to include. Known names: "
-            "head_cam,left_arm_cam,right_arm_cam"
+            "head_cam,head_cam_right,left_arm_cam,right_arm_cam"
         ),
     )
     parser.add_argument(
@@ -767,6 +922,46 @@ def main() -> None:
     if args.encoder_threads is not None and args.encoder_threads <= 0:
         raise SystemExit("--encoder-threads must be positive when provided")
     camera_names = parse_camera_names(args.cameras)
+    head_eye_names = {"head_cam", "head_cam_right"}
+    if args.rectify_head_stereo and not head_eye_names.intersection(camera_names):
+        raise SystemExit("--rectify-head-stereo requires head_cam and/or head_cam_right in --cameras")
+    if "head_cam_right" in camera_names and not args.rectify_head_stereo:
+        raise SystemExit("head_cam_right is only valid with --rectify-head-stereo")
+    try:
+        if not args.rectify_head_stereo:
+            head_stereo_rectifier = None
+        elif args.head_stereo_profile in {"legacy_data_process", "data_process_20260729"}:
+            if args.head_stereo_cam_calibration is not None:
+                raise SystemExit(
+                    "--head-stereo-cam-calibration requires --head-stereo-profile cam_20260729"
+                )
+            if args.head_stereo_profile == "data_process_20260729":
+                default_calibration = DEFAULT_DATA_PROCESS_20260729_CALIBRATION
+                default_processing = DEFAULT_DATA_PROCESS_20260729_PROCESSING
+            else:
+                default_calibration = DEFAULT_HEAD_STEREO_CALIBRATION
+                default_processing = DEFAULT_HEAD_STEREO_PROCESSING
+            head_stereo_rectifier = LegacyTopStereoRectifier(
+                calibration_path=args.head_stereo_calibration
+                if args.head_stereo_calibration is not None
+                else default_calibration,
+                processing_path=args.head_stereo_processing
+                if args.head_stereo_processing is not None
+                else default_processing,
+            )
+        else:
+            if args.head_stereo_calibration is not None or args.head_stereo_processing is not None:
+                raise SystemExit(
+                    "--head-stereo-calibration/--head-stereo-processing apply only to "
+                    "--head-stereo-profile data_process_20260729 or legacy_data_process"
+                )
+            head_stereo_rectifier = Cam20260729TopStereoRectifier(
+                calibration_path=args.head_stereo_cam_calibration
+                if args.head_stereo_cam_calibration is not None
+                else DEFAULT_HEAD_STEREO_CAM_20260729_CALIBRATION,
+            )
+    except (LegacyTopStereoRectificationError, Cam20260729TopStereoRectificationError) as exc:
+        raise SystemExit(f"Unable to initialize --rectify-head-stereo: {exc}") from exc
     frozen_fields = parse_vector_field_names(args.frozen_fields)
     frozen_indices = tuple(AUTO_CMD_FIELD_TO_INDEX[name] for name in frozen_fields)
     exclude_bags = {
@@ -838,6 +1033,28 @@ def main() -> None:
     print("  Layout:   /zeno/h1/auto/wholebody/cmd[1..23]")
     print("  Note:     base state uses odom_raw; base action uses twist/cmd")
     print(f"  Cameras:  {', '.join(camera_names)}")
+    if head_stereo_rectifier is not None:
+        contract = head_stereo_rectifier.contract
+        rectified = (
+            f"{contract.rectified_width_per_eye}x{contract.rectified_height_per_eye}"
+        )
+        crop = getattr(contract, "crop_width", None)
+        crop_text = (
+            f" -> crop {contract.crop_width}x{contract.crop_height}"
+            if crop is not None
+            else " -> no additional spatial crop"
+        )
+        print(
+            "  HeadCam:  independently rectified left/right eyes "
+            f"{contract.side_by_side_size[0]}x{contract.side_by_side_size[1]} "
+            f"-> {rectified}{crop_text} -> {img_size[0]}x{img_size[1]} RGB"
+        )
+        print(
+            f"            model resize={args.head_stereo_resize_mode}; "
+            f"features={[name for name in camera_names if name in head_eye_names]}"
+        )
+    else:
+        print("  HeadCam:  legacy generic decode (no top-stereo rectification)")
     print(f"  Frozen:   {', '.join(frozen_fields) if frozen_fields else 'none'}")
     print(f"{'=' * 60}")
 
@@ -854,6 +1071,8 @@ def main() -> None:
             img_size=img_size,
             camera_names=camera_names,
             center_crop_fraction=args.center_crop_fraction,
+            head_stereo_rectifier=head_stereo_rectifier,
+            head_stereo_resize_mode=args.head_stereo_resize_mode,
             max_frames=args.max_frames,
             frozen_indices=frozen_indices,
         )
@@ -868,6 +1087,54 @@ def main() -> None:
         del result
 
     dataset.finalize()
+
+    if head_stereo_rectifier is not None:
+        # Persist an unambiguous, content-addressed record beside LeRobot's
+        # normal metadata. V3 hard-links the corrected videos and copies this
+        # file, so downstream training/inspection can reject accidental reuse
+        # of the old unrectified source dataset.
+        provenance = head_stereo_rectifier.contract.as_dict()
+        if args.head_stereo_profile == "data_process_20260729":
+            # This is intentionally explicit rather than calling the JSON
+            # contract "legacy": it makes a wrong calibration impossible to
+            # silently pass a later source/V3/cache/deployment audit.
+            provenance.update(
+                {
+                    "profile": "data_process_20260729",
+                    "contract_source": "Data/process/rectify_topcam_stereo.py",
+                    "spatial_crop": provenance["crop"],
+                }
+            )
+        provenance.update(
+            {
+                "model_output_size": {"width": img_size[0], "height": img_size[1]},
+                "model_output_color": "RGB",
+                "head_stereo_model_resize_mode": args.head_stereo_resize_mode,
+                "head_camera_feature_to_eye": {
+                    name: "left" if name == "head_cam" else "right"
+                    for name in camera_names
+                    if name in head_eye_names
+                },
+                "selected_model_topcam_eye": (
+                    "left" if camera_names == ["head_cam", "left_arm_cam", "right_arm_cam"] else None
+                ),
+                "emitted_head_eyes": (
+                    ["left"] if camera_names == ["head_cam", "left_arm_cam", "right_arm_cam"] else None
+                ),
+                "generic_center_crop_applied_to_head_stereo": False,
+            }
+        )
+        if provenance["selected_model_topcam_eye"] == "left":
+            # Rectification still uses the full calibrated stereo geometry
+            # (K1/D1/R1/P1 with the paired right-eye calibration), but the
+            # learning/deployment contract exposes only the aligned left RGB.
+            provenance["output_eyes"] = ["left"]
+        provenance_path = output_path / "meta" / "topcam_rectification.json"
+        provenance_path.write_text(
+            json.dumps(provenance, indent=2, sort_keys=True) + "\n",
+            encoding="utf-8",
+        )
+        print(f"  Topcam:   provenance written to {provenance_path}")
 
     total_elapsed = time.time() - total_start
     complete = successful == total_bags
