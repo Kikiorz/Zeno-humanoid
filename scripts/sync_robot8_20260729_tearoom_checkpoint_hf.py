@@ -12,11 +12,12 @@ from __future__ import annotations
 import argparse
 import json
 import os
+import re
 import subprocess
 import tempfile
 from pathlib import Path
 
-from huggingface_hub import HfApi, snapshot_download
+from huggingface_hub import HfApi, hf_hub_download, snapshot_download
 
 
 REPO_ROOT = Path(__file__).resolve().parents[1]
@@ -52,9 +53,49 @@ def checkpoint_paths(artifact_root: Path, step: int) -> tuple[Path, Path, Path]:
     return checkpoint, checkpoint / "pretrained_model", checkpoint / "training_state"
 
 
-def require_complete_checkpoint(artifact_root: Path, step: int) -> tuple[Path, Path, Path]:
+def require_strict_download_target(
+    artifact_root: Path, step: int, checkpoint: Path, pretrained: Path
+) -> None:
+    """Reject a target that is not exactly ``checkpoints/{step:06d}``.
+
+    Keeping this check close to the Hub download protects against accidentally
+    materializing e.g. a requested step 4,000 below ``checkpoints/040000``.
+    The artifact root is resolved by ``main`` so these comparisons are lexical
+    and unambiguous.
+    """
+    expected_checkpoint = checkpoint_dir(artifact_root, step)
+    expected_pretrained = expected_checkpoint / "pretrained_model"
+    if checkpoint != expected_checkpoint or pretrained != expected_pretrained:
+        raise RuntimeError(
+            "unsafe checkpoint download target: "
+            f"expected {expected_checkpoint}, got {checkpoint}"
+        )
+    if checkpoint.name != f"{step:06d}" or checkpoint.parent.name != "checkpoints":
+        raise RuntimeError(
+            "checkpoint target must be exactly "
+            f"checkpoints/{step:06d}, got {checkpoint}"
+        )
+    if checkpoint.is_symlink() or pretrained.is_symlink():
+        raise RuntimeError(
+            "refusing to download through a checkpoint/pretrained_model symlink: "
+            f"{checkpoint}"
+        )
+
+
+def require_deployable_pretrained(artifact_root: Path, step: int) -> tuple[Path, Path, Path]:
+    """Check only the inference payload, without requiring resume state."""
     checkpoint, pretrained, training_state = checkpoint_paths(artifact_root, step)
+    require_strict_download_target(artifact_root, step, checkpoint, pretrained)
     missing = [pretrained / name for name in MODEL_FILES if not (pretrained / name).is_file()]
+    if missing:
+        details = "\n".join(str(path) for path in missing)
+        raise FileNotFoundError(f"deployable checkpoint {step} is incomplete:\n{details}")
+    return checkpoint, pretrained, training_state
+
+
+def require_complete_checkpoint(artifact_root: Path, step: int) -> tuple[Path, Path, Path]:
+    checkpoint, pretrained, training_state = require_deployable_pretrained(artifact_root, step)
+    missing: list[Path] = []
     step_file = training_state / "training_step.json"
     if not step_file.is_file():
         missing.append(step_file)
@@ -65,6 +106,24 @@ def require_complete_checkpoint(artifact_root: Path, step: int) -> tuple[Path, P
     if int(payload.get("step", -1)) != step:
         raise ValueError(f"{step_file} does not record step {step}")
     return checkpoint, pretrained, training_state
+
+
+def require_remote_recorded_step(repo_id: str, step: int) -> int:
+    """Verify the Hub model card records the exact requested checkpoint step."""
+    readme = hf_hub_download(repo_id=repo_id, repo_type="model", filename="README.md")
+    text = Path(readme).read_text(encoding="utf-8")
+    match = re.search(r"(?m)^- Saved step:\s*`(\d+)`\s*$", text)
+    if not match:
+        raise ValueError(
+            f"{repo_id} README.md does not contain the expected '- Saved step: `N`' record"
+        )
+    recorded_step = int(match.group(1))
+    if recorded_step != step:
+        raise ValueError(
+            f"Hub checkpoint step mismatch: requested {step}, but {repo_id} README.md records "
+            f"step {recorded_step}"
+        )
+    return recorded_step
 
 
 def source_commit(root: Path) -> str:
@@ -180,13 +239,31 @@ def upload(root: Path, artifact_root: Path, step: int, repo_id: str, public: boo
     print(f"uploaded https://huggingface.co/{repo_id}")
 
 
-def download(root: Path, artifact_root: Path, step: int, repo_id: str, overwrite: bool) -> None:
+def download(
+    root: Path,
+    artifact_root: Path,
+    step: int,
+    repo_id: str,
+    overwrite: bool,
+    deploy_only: bool,
+) -> None:
     checkpoint, pretrained, training_state = checkpoint_paths(artifact_root, step)
-    existing = [path for path in (*[pretrained / name for name in MODEL_FILES], training_state / "training_step.json") if path.exists()]
+    require_strict_download_target(artifact_root, step, checkpoint, pretrained)
+    files_to_check = [pretrained / name for name in MODEL_FILES]
+    if not deploy_only:
+        files_to_check.append(training_state / "training_step.json")
+    existing = [path for path in files_to_check if path.exists()]
     if existing and not overwrite:
         details = "\n".join(str(path) for path in existing)
         raise FileExistsError(f"refusing to replace existing checkpoint files:\n{details}\npass --overwrite after checking them")
     normalize_socks_proxy()
+    recorded_step = require_remote_recorded_step(repo_id, step)
+    print(
+        "download request: "
+        f"repo={repo_id}, requested_step={step}, recorded_step={recorded_step}, "
+        f"deploy_only={deploy_only}"
+    )
+    print(f"download target (strict): {checkpoint} [checkpoints/{step:06d}]")
     pretrained.mkdir(parents=True, exist_ok=True)
     checkpoint.mkdir(parents=True, exist_ok=True)
     snapshot_download(
@@ -195,14 +272,20 @@ def download(root: Path, artifact_root: Path, step: int, repo_id: str, overwrite
         allow_patterns=list(MODEL_FILES),
         local_dir=str(pretrained),
     )
-    snapshot_download(
-        repo_id=repo_id,
-        repo_type="model",
-        allow_patterns=["training_state/**"],
-        local_dir=str(checkpoint),
-    )
-    require_complete_checkpoint(artifact_root, step)
-    print(f"downloaded {repo_id} -> {checkpoint}")
+    if deploy_only:
+        # This intentionally avoids ``training_state/**``: optimizer, scheduler,
+        # and RNG files are not deployment dependencies.
+        require_deployable_pretrained(artifact_root, step)
+        print(f"downloaded deployable pretrained_model only: {repo_id} -> {pretrained}")
+    else:
+        snapshot_download(
+            repo_id=repo_id,
+            repo_type="model",
+            allow_patterns=["training_state/**"],
+            local_dir=str(checkpoint),
+        )
+        require_complete_checkpoint(artifact_root, step)
+        print(f"downloaded complete resumable checkpoint: {repo_id} -> {checkpoint}")
 
 
 def parse_args() -> argparse.Namespace:
@@ -219,9 +302,19 @@ def parse_args() -> argparse.Namespace:
     )
     parser.add_argument("--public", action="store_true", help="Make a newly-created model repository public")
     parser.add_argument("--overwrite", action="store_true", help="Allow download to overwrite existing checkpoint files")
+    parser.add_argument(
+        "--deploy-only",
+        action="store_true",
+        help=(
+            "Download only deployable pretrained_model files (model, config, and processors); "
+            "do not download optimizer/RNG training_state"
+        ),
+    )
     args = parser.parse_args()
     if args.step <= 0:
         parser.error("--step must be positive")
+    if args.deploy_only and args.mode != "download":
+        parser.error("--deploy-only is valid only with download")
     return args
 
 
@@ -233,7 +326,7 @@ def main() -> None:
     if args.mode == "upload":
         upload(root, artifact_root, args.step, repo_id, args.public)
     else:
-        download(root, artifact_root, args.step, repo_id, args.overwrite)
+        download(root, artifact_root, args.step, repo_id, args.overwrite, args.deploy_only)
 
 
 if __name__ == "__main__":
