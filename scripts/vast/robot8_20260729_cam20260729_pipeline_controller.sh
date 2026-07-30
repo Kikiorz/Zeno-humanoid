@@ -17,6 +17,8 @@ EXPECTED_TOPCAM_PIPELINE="${EXPECTED_TOPCAM_PIPELINE:-split_left_right_then_cam_
 EXPECTED_TOPCAM_RECTIFIED_HEIGHT="${EXPECTED_TOPCAM_RECTIFIED_HEIGHT:-720}"
 EXPECTED_TOPCAM_CALIBRATION_SHA256="${EXPECTED_TOPCAM_CALIBRATION_SHA256:-}"
 EXPECTED_TOPCAM_PROCESSING_SHA256="${EXPECTED_TOPCAM_PROCESSING_SHA256:-}"
+EXPECTED_EPISODES="${EXPECTED_EPISODES:-18}"
+EXPECTED_FRAMES="${EXPECTED_FRAMES:-19074}"
 
 RAW_TRAIN_PROGRAM="${RAW_TRAIN_PROGRAM:-robot8_20260729_cam20260729_raw_train}"
 V3_TRAIN_PROGRAM="${V3_TRAIN_PROGRAM:-robot8_20260729_cam20260729_v3_train}"
@@ -32,6 +34,10 @@ if [[ ! -x "${VENV_DIR}/bin/python" ]]; then
 fi
 if ! [[ "${POLL_SECONDS}" =~ ^[0-9]+$ ]] || (( POLL_SECONDS < 1 )); then
   printf 'POLL_SECONDS must be a positive integer\n' >&2
+  exit 1
+fi
+if ! [[ "${EXPECTED_EPISODES}" =~ ^[1-9][0-9]*$ && "${EXPECTED_FRAMES}" =~ ^[1-9][0-9]*$ ]]; then
+  printf 'EXPECTED_EPISODES and EXPECTED_FRAMES must be positive decimal integers\n' >&2
   exit 1
 fi
 
@@ -65,7 +71,8 @@ source_ready() {
   "${VENV_DIR}/bin/python" - \
     "${SOURCE_DATASET}" "${EXPECTED_TOPCAM_PROFILE}" "${EXPECTED_TOPCAM_PIPELINE}" \
     "${EXPECTED_TOPCAM_RECTIFIED_HEIGHT}" "${EXPECTED_TOPCAM_CALIBRATION_SHA256}" \
-    "${EXPECTED_TOPCAM_PROCESSING_SHA256}" <<'PY'
+    "${EXPECTED_TOPCAM_PROCESSING_SHA256}" "${EXPECTED_EPISODES}" \
+    "${EXPECTED_FRAMES}" <<'PY'
 import json
 import sys
 from pathlib import Path
@@ -78,7 +85,8 @@ except (FileNotFoundError, json.JSONDecodeError):
 profile, pipeline = sys.argv[2], sys.argv[3]
 rectified_height = int(sys.argv[4])
 calibration_sha, processing_sha = sys.argv[5], sys.argv[6]
-if {k: info.get(k) for k in ("fps", "total_episodes", "total_frames")} != {"fps": 20, "total_episodes": 18, "total_frames": 19074}:
+expected = {"fps": 20, "total_episodes": int(sys.argv[7]), "total_frames": int(sys.argv[8])}
+if {k: info.get(k) for k in expected} != expected:
     raise SystemExit(1)
 if top.get("profile") != profile or top.get("pipeline") != pipeline or top.get("spatial_crop") != {
     "x": 20, "y": 0, "width": 1240, "height": 620

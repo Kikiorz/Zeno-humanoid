@@ -12,8 +12,13 @@ OUTPUT_ROOT="${OUTPUT_ROOT:-${REPO_ROOT}/Data/lerobot}"
 DATASET_REPO_ID="${DATASET_REPO_ID:-robot8_20260729_zeno_h1_auto_cmd_v30_3cam_640x480_topcam_left_cam20260729_all23}"
 DATASET_ROOT="${DATASET_ROOT:-${OUTPUT_ROOT}/${DATASET_REPO_ID}}"
 LOG_DIR="${LOG_DIR:-${REPO_ROOT}/outputs/logs}"
-EXPECTED_EPISODES=18
-EXPECTED_FRAMES=19074
+TASK_LABEL="${TASK_LABEL:-robot8_20260729}"
+EXPECTED_EPISODES="${EXPECTED_EPISODES:-18}"
+EXPECTED_FRAMES="${EXPECTED_FRAMES:-19074}"
+# A three-camera source must exclude bags that have no frames on one of the
+# required camera topics.  Keep the default empty so the historical run is
+# unchanged; callers pass a comma-separated list after data inspection.
+EXCLUDE_BAGS="${EXCLUDE_BAGS:-}"
 TOPCAM_PROFILE="${TOPCAM_PROFILE:-cam_20260729}"
 HEAD_STEREO_CALIBRATION="${HEAD_STEREO_CALIBRATION:-}"
 HEAD_STEREO_PROCESSING="${HEAD_STEREO_PROCESSING:-}"
@@ -80,11 +85,11 @@ PY
 
 printf '[%s] converting fresh 2026-07-29 %s head-stereo source: %s\n' \
   "$(date '+%F %T')" "${TOPCAM_PROFILE}" "${DATASET_ROOT}"
-"${VENV_DIR}/bin/python" "${REPO_ROOT}/scripts/data_convert/convert_zeno_h1_v30.py" \
+convert_args=(
   --data-dir "${DATA_DIR}" \
   --output-dir "${OUTPUT_ROOT}" \
   --repo-name "${DATASET_REPO_ID}" \
-  --task robot8_20260729 \
+  --task "${TASK_LABEL}" \
   --fps 20 \
   --img-width 640 --img-height 480 \
   --center-crop-fraction 1.0 \
@@ -96,6 +101,12 @@ printf '[%s] converting fresh 2026-07-29 %s head-stereo source: %s\n' \
   --frozen-fields '' \
   --vcodec h264 --video-crf 18 --video-gop 2 --video-fast-decode 1 \
   --video-preset veryfast --encoder-threads 16
+)
+if [[ -n "${EXCLUDE_BAGS//[[:space:],]/}" ]]; then
+  convert_args+=(--exclude-bags "${EXCLUDE_BAGS}")
+fi
+"${VENV_DIR}/bin/python" "${REPO_ROOT}/scripts/data_convert/convert_zeno_h1_v30.py" \
+  "${convert_args[@]}"
 
 "${VENV_DIR}/bin/python" - \
   "${DATASET_ROOT}" "${EXPECTED_EPISODES}" "${EXPECTED_FRAMES}" \

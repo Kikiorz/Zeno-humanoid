@@ -208,6 +208,14 @@ def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--source-dataset", type=Path, default=SOURCE_DATASET)
     parser.add_argument("--bag-data-dir", type=Path, default=DEFAULT_BAG_DATA)
+    parser.add_argument(
+        "--exclude-bags",
+        default="",
+        help=(
+            "Comma-separated raw bag directory names to exclude. Use the same "
+            "list as conversion when a source bag lacks a required camera."
+        ),
+    )
     parser.add_argument("--output-dataset", type=Path, default=DEFAULT_OUTPUT_DATASET)
     parser.add_argument("--analysis-dir", type=Path, default=DEFAULT_ANALYSIS_DIR)
     parser.add_argument(
@@ -266,6 +274,15 @@ def parse_args() -> argparse.Namespace:
         ),
     )
     return parser.parse_args()
+
+
+def parse_excluded_bag_names(raw: str) -> set[str]:
+    """Parse a conservative, comma-separated set of bag directory names."""
+    names = {name.strip() for name in raw.split(",") if name.strip()}
+    unsafe = sorted(name for name in names if Path(name).name != name or name in {".", ".."})
+    if unsafe:
+        raise SystemExit(f"--exclude-bags must contain directory names only, got {unsafe}")
+    return names
 
 
 def build_config(args: argparse.Namespace) -> V2Config:
@@ -1794,6 +1811,7 @@ def main() -> None:
         "rosbag2_2026_07_21_15_09_46",
         "rosbag2_2026_07_21_16_11_11",
     }
+    excluded.update(parse_excluded_bag_names(args.exclude_bags))
     bag_paths = converter.collect_bag_paths(bag_data, exclude_bags=excluded)
     if len(bag_paths) != len(bounds):
         raise RuntimeError(
@@ -1802,6 +1820,8 @@ def main() -> None:
 
     print(f"Source: {source}", flush=True)
     print(f"Bags:   {bag_data}", flush=True)
+    if args.exclude_bags:
+        print(f"Excluded raw bags: {', '.join(sorted(parse_excluded_bag_names(args.exclude_bags)))}", flush=True)
     print(
         f"Mode:   {'dry-run' if args.dry_run else f'create derived {config.dataset_version} dataset'}",
         flush=True,
@@ -1888,6 +1908,7 @@ def main() -> None:
         "dry_run": bool(args.dry_run),
         "frames": len(source_table),
         "episodes": len(bounds),
+        "excluded_bags": sorted(excluded),
         "base_action_semantics": "desired physical odom body twist",
         "anchor_count": len(all_anchors),
         "anchor_motion_segment_count": len(all_audits),

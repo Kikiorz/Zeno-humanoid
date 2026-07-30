@@ -17,6 +17,7 @@ EXPECTED_TOPCAM_PIPELINE="${EXPECTED_TOPCAM_PIPELINE:-split_left_right_then_cam_
 EXPECTED_TOPCAM_RECTIFIED_HEIGHT="${EXPECTED_TOPCAM_RECTIFIED_HEIGHT:-720}"
 EXPECTED_TOPCAM_CALIBRATION_SHA256="${EXPECTED_TOPCAM_CALIBRATION_SHA256:-}"
 EXPECTED_TOPCAM_PROCESSING_SHA256="${EXPECTED_TOPCAM_PROCESSING_SHA256:-}"
+EXCLUDE_BAGS="${EXCLUDE_BAGS:-}"
 
 if [[ ! -x "${VENV_DIR}/bin/python" ]]; then
   printf 'Missing Python environment: %s\n' "${VENV_DIR}" >&2
@@ -72,8 +73,7 @@ if payload.get("head_stereo_model_resize_mode") != "letterbox" or payload.get("s
 PY
 
 printf '[%s] deriving endpoint-accurate V3 labels: %s\n' "$(date '+%F %T')" "${DATASET_ROOT}"
-"${VENV_DIR}/bin/python" \
-  "${REPO_ROOT}/scripts/data_clean/reconstruct_robot8_20260721_base_anchor_odom_v2.py" \
+v3_args=(
   --source-dataset "${SOURCE_DATASET}" \
   --bag-data-dir "${RAW_DATA_DIR}" \
   --output-dataset "${DATASET_ROOT}" \
@@ -83,6 +83,13 @@ printf '[%s] deriving endpoint-accurate V3 labels: %s\n' "$(date '+%F %T')" "${D
   --dataset-version base_anchor_odom_v3_decoupled_smooth \
   --metadata-dir-name base_anchor_odom_v3_decoupled_smooth \
   --secondary-smooth-window 11
+)
+if [[ -n "${EXCLUDE_BAGS//[[:space:],]/}" ]]; then
+  v3_args+=(--exclude-bags "${EXCLUDE_BAGS}")
+fi
+"${VENV_DIR}/bin/python" \
+  "${REPO_ROOT}/scripts/data_clean/reconstruct_robot8_20260721_base_anchor_odom_v2.py" \
+  "${v3_args[@]}"
 
 "${VENV_DIR}/bin/python" - "${DATASET_ROOT}" <<'PY'
 import json
