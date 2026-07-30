@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
 # Supervisor-owned normal-only TeaRoom pipeline:
-# conversion -> durable frozen-DINO cache -> bounded two-GPU DDP training.
+# conversion -> durable frozen-DINO cache -> two-GPU DDP normal training.
 set -euo pipefail
 
 REPO_ROOT="${REPO_ROOT:-/workspace/2027icra}"
@@ -16,7 +16,7 @@ EXPECTED_TOPCAM_PIPELINE="${EXPECTED_TOPCAM_PIPELINE:-split_left_right_then_cam_
 EXPECTED_TOPCAM_RECTIFIED_HEIGHT="${EXPECTED_TOPCAM_RECTIFIED_HEIGHT:-720}"
 EXPECTED_TOPCAM_CALIBRATION_SHA256="${EXPECTED_TOPCAM_CALIBRATION_SHA256:-}"
 NORMAL_TRAIN_PROGRAM="${NORMAL_TRAIN_PROGRAM:-robot8_20260729_tearoom_cam20260729_normal_train}"
-NORMAL_SUCCESS="${NORMAL_SUCCESS:-${REPO_ROOT}/outputs/train/robot8_20260729_tearoom_act_dinov3_3cam_640x480_topcam_left_cam20260729_all23_decoder7_ddp32_b16_20k/TRAINING_SUCCEEDED}"
+NORMAL_SUCCESS="${NORMAL_SUCCESS:-${REPO_ROOT}/outputs/train/robot8_20260729_tearoom_act_dinov3_3cam_640x480_topcam_left_cam20260729_all23_decoder7_ddp32_b16_60k/TRAINING_SUCCEEDED}"
 CONVERT_SCRIPT="${CONVERT_SCRIPT:-${REPO_ROOT}/scripts/vast/robot8_20260729_cam20260729_rectified_convert.sh}"
 CACHE_BUILD_SCRIPT="${CACHE_BUILD_SCRIPT:-${REPO_ROOT}/scripts/vast/robot8_20260729_tearoom_cam20260729_normal_cache.sh}"
 
