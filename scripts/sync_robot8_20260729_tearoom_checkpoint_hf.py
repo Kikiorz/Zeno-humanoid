@@ -44,17 +44,19 @@ def normalize_socks_proxy() -> None:
             os.environ[name] = "socks5://" + value.removeprefix("socks://")
 
 
-def checkpoint_dir(artifact_root: Path, step: int) -> Path:
-    return artifact_root / "outputs" / "train" / RUN_ID / "checkpoints" / f"{step:06d}"
+def checkpoint_dir(artifact_root: Path, step: int, run_id: str = RUN_ID) -> Path:
+    return artifact_root / "outputs" / "train" / run_id / "checkpoints" / f"{step:06d}"
 
 
-def checkpoint_paths(artifact_root: Path, step: int) -> tuple[Path, Path, Path]:
-    checkpoint = checkpoint_dir(artifact_root, step)
+def checkpoint_paths(
+    artifact_root: Path, step: int, run_id: str = RUN_ID
+) -> tuple[Path, Path, Path]:
+    checkpoint = checkpoint_dir(artifact_root, step, run_id)
     return checkpoint, checkpoint / "pretrained_model", checkpoint / "training_state"
 
 
 def require_strict_download_target(
-    artifact_root: Path, step: int, checkpoint: Path, pretrained: Path
+    artifact_root: Path, step: int, checkpoint: Path, pretrained: Path, run_id: str = RUN_ID
 ) -> None:
     """Reject a target that is not exactly ``checkpoints/{step:06d}``.
 
@@ -63,7 +65,7 @@ def require_strict_download_target(
     The artifact root is resolved by ``main`` so these comparisons are lexical
     and unambiguous.
     """
-    expected_checkpoint = checkpoint_dir(artifact_root, step)
+    expected_checkpoint = checkpoint_dir(artifact_root, step, run_id)
     expected_pretrained = expected_checkpoint / "pretrained_model"
     if checkpoint != expected_checkpoint or pretrained != expected_pretrained:
         raise RuntimeError(
@@ -82,10 +84,12 @@ def require_strict_download_target(
         )
 
 
-def require_deployable_pretrained(artifact_root: Path, step: int) -> tuple[Path, Path, Path]:
+def require_deployable_pretrained(
+    artifact_root: Path, step: int, run_id: str = RUN_ID
+) -> tuple[Path, Path, Path]:
     """Check only the inference payload, without requiring resume state."""
-    checkpoint, pretrained, training_state = checkpoint_paths(artifact_root, step)
-    require_strict_download_target(artifact_root, step, checkpoint, pretrained)
+    checkpoint, pretrained, training_state = checkpoint_paths(artifact_root, step, run_id)
+    require_strict_download_target(artifact_root, step, checkpoint, pretrained, run_id)
     missing = [pretrained / name for name in MODEL_FILES if not (pretrained / name).is_file()]
     if missing:
         details = "\n".join(str(path) for path in missing)
@@ -93,8 +97,12 @@ def require_deployable_pretrained(artifact_root: Path, step: int) -> tuple[Path,
     return checkpoint, pretrained, training_state
 
 
-def require_complete_checkpoint(artifact_root: Path, step: int) -> tuple[Path, Path, Path]:
-    checkpoint, pretrained, training_state = require_deployable_pretrained(artifact_root, step)
+def require_complete_checkpoint(
+    artifact_root: Path, step: int, run_id: str = RUN_ID
+) -> tuple[Path, Path, Path]:
+    checkpoint, pretrained, training_state = require_deployable_pretrained(
+        artifact_root, step, run_id
+    )
     missing: list[Path] = []
     step_file = training_state / "training_step.json"
     if not step_file.is_file():
@@ -142,7 +150,7 @@ def default_repo_id(owner: str, step: int) -> str:
     return f"{owner}/robot8-20260729-tearoom-act-dinov3-normal-{step // 1000}k"
 
 
-def model_card(repo_id: str, step: int, commit: str) -> str:
+def model_card(repo_id: str, step: int, commit: str, run_id: str) -> str:
     return f"""---
 library_name: lerobot
 tags:
@@ -155,7 +163,7 @@ tags:
 
 # TeaRoom normal ACT+DINOv3 checkpoint — step {step}
 
-- Training run: `{RUN_ID}`
+- Training run: `{run_id}`
 - Saved step: `{step}`
 - Policy: ACT, decoder layers 7, frozen DINOv3 ViT-B/16 LVD backbone
 - Cameras: `head_cam,left_arm_cam,right_arm_cam`
@@ -174,8 +182,15 @@ Repository: https://huggingface.co/{repo_id}
 """
 
 
-def upload(root: Path, artifact_root: Path, step: int, repo_id: str, public: bool) -> None:
-    _, pretrained, training_state = require_complete_checkpoint(artifact_root, step)
+def upload(
+    root: Path,
+    artifact_root: Path,
+    step: int,
+    repo_id: str,
+    public: bool,
+    run_id: str,
+) -> None:
+    _, pretrained, training_state = require_complete_checkpoint(artifact_root, step, run_id)
     normalize_socks_proxy()
     api = HfApi()
     api.whoami()  # Verify credentials before creating or mutating a repository.
@@ -227,7 +242,7 @@ def upload(root: Path, artifact_root: Path, step: int, repo_id: str, public: boo
             commit_message=f"Upload deployment asset: {source.name}",
         )
     with tempfile.NamedTemporaryFile("w", encoding="utf-8", suffix=".md") as file:
-        file.write(model_card(repo_id, step, source_commit(root)))
+        file.write(model_card(repo_id, step, source_commit(root), run_id))
         file.flush()
         api.upload_file(
             path_or_fileobj=file.name,
@@ -246,9 +261,10 @@ def download(
     repo_id: str,
     overwrite: bool,
     deploy_only: bool,
+    run_id: str,
 ) -> None:
-    checkpoint, pretrained, training_state = checkpoint_paths(artifact_root, step)
-    require_strict_download_target(artifact_root, step, checkpoint, pretrained)
+    checkpoint, pretrained, training_state = checkpoint_paths(artifact_root, step, run_id)
+    require_strict_download_target(artifact_root, step, checkpoint, pretrained, run_id)
     files_to_check = [pretrained / name for name in MODEL_FILES]
     if not deploy_only:
         files_to_check.append(training_state / "training_step.json")
@@ -275,7 +291,7 @@ def download(
     if deploy_only:
         # This intentionally avoids ``training_state/**``: optimizer, scheduler,
         # and RNG files are not deployment dependencies.
-        require_deployable_pretrained(artifact_root, step)
+        require_deployable_pretrained(artifact_root, step, run_id)
         print(f"downloaded deployable pretrained_model only: {repo_id} -> {pretrained}")
     else:
         snapshot_download(
@@ -284,7 +300,7 @@ def download(
             allow_patterns=["training_state/**"],
             local_dir=str(checkpoint),
         )
-        require_complete_checkpoint(artifact_root, step)
+        require_complete_checkpoint(artifact_root, step, run_id)
         print(f"downloaded complete resumable checkpoint: {repo_id} -> {checkpoint}")
 
 
@@ -292,6 +308,11 @@ def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("mode", choices=("upload", "download"))
     parser.add_argument("--step", type=int, default=2_000, help="Numbered checkpoint step to synchronize")
+    parser.add_argument(
+        "--run-id",
+        default=RUN_ID,
+        help="Training run directory below outputs/train (defaults to the TeaRoom sequential-cache run)",
+    )
     parser.add_argument("--owner", default=OWNER_DEFAULT)
     parser.add_argument("--repo-id", help="HF repository; defaults to a private TeaRoom step-specific repository")
     parser.add_argument("--repo-root", type=Path, default=REPO_ROOT, help="Source checkout containing deploy code")
@@ -313,6 +334,8 @@ def parse_args() -> argparse.Namespace:
     args = parser.parse_args()
     if args.step <= 0:
         parser.error("--step must be positive")
+    if args.run_id in {".", ".."} or Path(args.run_id).name != args.run_id:
+        parser.error("--run-id must be one non-empty directory name, not a path")
     if args.deploy_only and args.mode != "download":
         parser.error("--deploy-only is valid only with download")
     return args
@@ -324,9 +347,17 @@ def main() -> None:
     artifact_root = (args.artifact_root or root).expanduser().resolve()
     repo_id = args.repo_id or default_repo_id(args.owner, args.step)
     if args.mode == "upload":
-        upload(root, artifact_root, args.step, repo_id, args.public)
+        upload(root, artifact_root, args.step, repo_id, args.public, args.run_id)
     else:
-        download(root, artifact_root, args.step, repo_id, args.overwrite, args.deploy_only)
+        download(
+            root,
+            artifact_root,
+            args.step,
+            repo_id,
+            args.overwrite,
+            args.deploy_only,
+            args.run_id,
+        )
 
 
 if __name__ == "__main__":
