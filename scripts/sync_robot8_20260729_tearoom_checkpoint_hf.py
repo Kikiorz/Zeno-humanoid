@@ -69,7 +69,12 @@ def require_complete_checkpoint(artifact_root: Path, step: int) -> tuple[Path, P
 
 def source_commit(root: Path) -> str:
     try:
-        return subprocess.check_output(["git", "rev-parse", "HEAD"], cwd=root, text=True).strip()
+        return subprocess.check_output(
+            ["git", "rev-parse", "HEAD"],
+            cwd=root,
+            text=True,
+            stderr=subprocess.DEVNULL,
+        ).strip()
     except (OSError, subprocess.CalledProcessError):
         return "unknown"
 
