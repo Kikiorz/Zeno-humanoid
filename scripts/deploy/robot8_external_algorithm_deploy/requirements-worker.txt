@@ -1,0 +1,5 @@
+# Install these in the external algorithm's Python environment.
+# The ROS bridge uses the robot's system ROS2 Python instead; do not try to
+# install rclpy from pip for the bridge.
+numpy>=1.24
+opencv-python-headless>=4.8

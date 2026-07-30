@@ -13,10 +13,13 @@ import numpy as np
 
 
 EXPECTED_CALIBRATION_SHA256 = "6d08b6a01a1431476c2c3c77bee43e3f8f20888f33940af772cf1963e9f6b342"
-REPO_ROOT = Path(__file__).resolve().parents[3]
-DATA_CONVERT_DIR = REPO_ROOT / "scripts" / "data_convert"
-if str(DATA_CONVERT_DIR) not in sys.path:
-    sys.path.insert(0, str(DATA_CONVERT_DIR))
+# This verifier is intentionally portable: copy this whole directory and the
+# sibling camera/ asset directory together; no checkout of the parent repo is
+# needed.
+PACKAGE_DIR = Path(__file__).resolve().parent
+CAMERA_DIR = PACKAGE_DIR / "camera"
+if str(CAMERA_DIR) not in sys.path:
+    sys.path.insert(0, str(CAMERA_DIR))
 
 from topcam_stereo_rectify_cam_20260729 import (  # noqa: E402
     TopStereoRectificationError,
@@ -25,7 +28,7 @@ from topcam_stereo_rectify_cam_20260729 import (  # noqa: E402
 
 
 DEFAULT_CALIBRATION = (
-    REPO_ROOT / "scripts" / "data_convert" / "cam" / "stereo_params_20260729_172611.npz"
+    CAMERA_DIR / "stereo_params_20260729_172611.npz"
 )
 
 
