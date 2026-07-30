@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Replay data03 through the two all-23D DINOv3 ACT deployment snapshots.
+"""Replay data03 through selected all-23D DINOv3 ACT deployment snapshots.
 
 The raw ROS bag is sampled exactly as the 20 Hz ROS bridge would use it: each
 tick receives the latest causally available state and compressed image from
@@ -30,15 +30,26 @@ import torch
 REPO_ROOT = Path(__file__).resolve().parents[2]
 SOURCE_PATH = REPO_ROOT / "scripts" / "analysis" / "replay_robot8_act_base_compare.py"
 RAW_DATA_DIR = REPO_ROOT / "Data" / "2026_07_21"
-DEFAULT_OUTPUT_DIR = REPO_ROOT / "outputs" / "analysis" / "robot8_20260721_data03_all23_normal_vs_base3x"
+DEFAULT_OUTPUT_DIR = (
+    REPO_ROOT / "outputs" / "analysis" / "robot8_20260721_data03_all23_90k_100k_local_compare"
+)
+NORMAL_RUN_DIR = (
+    REPO_ROOT
+    / "outputs"
+    / "train"
+    / "robot8_20260721_act_dinov3_3cam_640x480_nocrop_all23_decoder7_ddp128_100k"
+)
+BASE3X_RUN_DIR = (
+    REPO_ROOT
+    / "outputs"
+    / "train"
+    / "robot8_20260721_act_dinov3_3cam_640x480_nocrop_all23_base3x_decoder7_ddp128_100k"
+)
 
 MODEL_SPECS: dict[str, dict[str, Any]] = {
     "normal_035000": {
         "checkpoint": (
-            REPO_ROOT
-            / "outputs"
-            / "train"
-            / "robot8_20260721_act_dinov3_3cam_640x480_nocrop_all23_decoder7_ddp128_100k"
+            NORMAL_RUN_DIR
             / "checkpoints"
             / "035000"
             / "pretrained_model"
@@ -46,12 +57,19 @@ MODEL_SPECS: dict[str, dict[str, Any]] = {
         "step": 35000,
         "description": "ordinary all-23D loss weights",
     },
+    "normal_090000": {
+        "checkpoint": NORMAL_RUN_DIR / "checkpoints" / "090000" / "pretrained_model",
+        "step": 90000,
+        "description": "ordinary all-23D loss weights; near-final checkpoint selected as a generalization candidate",
+    },
+    "normal_100000": {
+        "checkpoint": NORMAL_RUN_DIR / "checkpoints" / "100000" / "pretrained_model",
+        "step": 100000,
+        "description": "ordinary all-23D loss weights; final 100k checkpoint",
+    },
     "base3x_030000": {
         "checkpoint": (
-            REPO_ROOT
-            / "outputs"
-            / "train"
-            / "robot8_20260721_act_dinov3_3cam_640x480_nocrop_all23_base3x_decoder7_ddp128_100k"
+            BASE3X_RUN_DIR
             / "checkpoints"
             / "030000"
             / "pretrained_model"
@@ -59,7 +77,13 @@ MODEL_SPECS: dict[str, dict[str, Any]] = {
         "step": 30000,
         "description": "all-23D with 3x base_vx/base_vy/base_rotation L1 weights",
     },
+    "base3x_100000": {
+        "checkpoint": BASE3X_RUN_DIR / "checkpoints" / "100000" / "pretrained_model",
+        "step": 100000,
+        "description": "all-23D with 3x base_vx/base_vy/base_rotation L1 weights; final 100k checkpoint",
+    },
 }
+DEFAULT_MODELS = ("normal_090000", "normal_100000", "base3x_100000")
 
 
 def load_shared_module() -> Any:
@@ -115,7 +139,7 @@ def parse_args() -> argparse.Namespace:
         "--models",
         nargs="+",
         choices=tuple(MODEL_SPECS),
-        default=list(MODEL_SPECS),
+        default=list(DEFAULT_MODELS),
         help="Model snapshots to replay",
     )
     return parser.parse_args()
