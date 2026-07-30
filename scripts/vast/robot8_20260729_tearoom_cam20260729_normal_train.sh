@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
-# Two-GPU normal-label TeaRoom ACT run. Each rank receives batch 16; the
-# effective global batch is therefore 32. The requested normal-label pass runs
+# Two-GPU normal-label TeaRoom ACT run. Each rank receives batch 32; the
+# effective global batch is therefore 64. The requested normal-label pass runs
 # for 60k optimizer steps and writes a durable checkpoint every 10k steps.
 set -euo pipefail
 
@@ -8,7 +8,7 @@ REPO_ROOT="${REPO_ROOT:-/workspace/2027icra}"
 VENV_DIR="${VENV_DIR:-/venv/main}"
 DATASET_REPO_ID="${DATASET_REPO_ID:-robot8_20260729_tearoom_zeno_h1_auto_cmd_v30_3cam_640x480_topcam_left_cam20260729_all23}"
 DATASET_ROOT="${DATASET_ROOT:-${REPO_ROOT}/Data/lerobot/${DATASET_REPO_ID}}"
-RUN_ID="${RUN_ID:-robot8_20260729_tearoom_act_dinov3_3cam_640x480_topcam_left_cam20260729_all23_decoder7_ddp32_b16_60k}"
+RUN_ID="${RUN_ID:-robot8_20260729_tearoom_act_dinov3_3cam_640x480_topcam_left_cam20260729_all23_decoder7_ddp64_b32_60k}"
 OUTPUT_DIR="${OUTPUT_DIR:-${REPO_ROOT}/outputs/train/${RUN_ID}}"
 CACHE_MANIFEST="${CACHE_MANIFEST:-${REPO_ROOT}/outputs/dino_feature_cache/robot8_20260729_tearoom_topcam_left_cam20260729_normal_dinov3_disk.json}"
 DINO_PRETRAINED_WEIGHTS="${DINO_PRETRAINED_WEIGHTS:-${REPO_ROOT}/.hf_home/hub/models--timm--vit_base_patch16_dinov3.lvd1689m/snapshots/c6a5fb7d12bbd3cf3b0079253141c3332aaed7da/model.safetensors}"
@@ -63,8 +63,8 @@ export REPO_ROOT VENV_DIR DATASET_REPO_ID DATASET_ROOT RUN_ID OUTPUT_DIR
 export TOTAL_STEPS="${TOTAL_STEPS:-60000}"
 export SAVE_FREQ="${SAVE_FREQ:-10000}"
 export NUM_PROCESSES=2
-export BATCH_SIZE=16
-export GLOBAL_BATCH_SIZE=32
+export BATCH_SIZE=32
+export GLOBAL_BATCH_SIZE=64
 export NUM_WORKERS="${NUM_WORKERS:-4}"
 export VIDEO_BACKEND=torchcodec
 export DINOV2_TRAIN_BACKBONE=false
