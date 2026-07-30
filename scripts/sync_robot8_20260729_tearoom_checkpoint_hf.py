@@ -20,7 +20,7 @@ from huggingface_hub import HfApi, snapshot_download
 
 
 REPO_ROOT = Path(__file__).resolve().parents[1]
-RUN_ID = "robot8_20260729_tearoom_act_dinov3_3cam_640x480_topcam_left_cam20260729_all23_decoder7_ddp64_b32_w6_60k"
+RUN_ID = "robot8_20260729_tearoom_act_dinov3_3cam_640x480_topcam_left_cam20260729_all23_decoder7_ddp32_b16_seqcache_60k"
 OWNER_DEFAULT = "QRP123"
 DEPLOY_DIR_NAME = "robot8_20260729_tearoom_3cam_act_dinov3_topcam_left_cam20260729"
 SHARED_DEPLOY_DIR_NAME = "robot8_act_dinov3_base_frozen_100k"
@@ -203,7 +203,7 @@ def download(root: Path, artifact_root: Path, step: int, repo_id: str, overwrite
 def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("mode", choices=("upload", "download"))
-    parser.add_argument("--step", type=int, default=10_000, help="Numbered checkpoint step to synchronize")
+    parser.add_argument("--step", type=int, default=2_000, help="Numbered checkpoint step to synchronize")
     parser.add_argument("--owner", default=OWNER_DEFAULT)
     parser.add_argument("--repo-id", help="HF repository; defaults to a private TeaRoom step-specific repository")
     parser.add_argument("--repo-root", type=Path, default=REPO_ROOT, help="Source checkout containing deploy code")

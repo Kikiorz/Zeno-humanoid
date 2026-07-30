@@ -27,11 +27,11 @@ different visual contract from training.
 The default checkpoint root is:
 
 ```text
-outputs/train/robot8_20260729_tearoom_act_dinov3_3cam_640x480_topcam_left_cam20260729_all23_decoder7_ddp64_b32_w6_60k
+outputs/train/robot8_20260729_tearoom_act_dinov3_3cam_640x480_topcam_left_cam20260729_all23_decoder7_ddp32_b16_seqcache_60k
 ```
 
 The worker automatically selects the latest complete numbered checkpoint below
-that directory.  A downloaded 10k snapshot therefore works without editing the
+that directory. A downloaded checkpoint therefore works without editing the
 wrapper.
 
 Start the model worker from this repository:

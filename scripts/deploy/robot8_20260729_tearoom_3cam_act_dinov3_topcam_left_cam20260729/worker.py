@@ -19,7 +19,7 @@ DEFAULT_CHECKPOINT_ROOT = (
     REPO_ROOT
     / "outputs"
     / "train"
-    / "robot8_20260729_tearoom_act_dinov3_3cam_640x480_topcam_left_cam20260729_all23_decoder7_ddp64_b32_w6_60k"
+    / "robot8_20260729_tearoom_act_dinov3_3cam_640x480_topcam_left_cam20260729_all23_decoder7_ddp32_b16_seqcache_60k"
 )
 DEFAULT_CALIBRATION = (
     REPO_ROOT
