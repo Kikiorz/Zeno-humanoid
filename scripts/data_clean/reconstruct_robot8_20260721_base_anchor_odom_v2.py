@@ -3,7 +3,7 @@
 
 This is intentionally a *new* dataset, not an overwrite of the original or
 of ``base_clean_cmdseg_v1``.  It replays the original ROS bags at exactly the
-same 20 Hz timestamps used by the converter, reads the real
+same configured timestamps used by the converter, reads the real
 ``/zeno/h1/sensor/odom_raw`` pose, and uses long stationary plateaus as
 high-confidence SE(2) anchors.
 
@@ -80,13 +80,16 @@ DEFAULT_ANALYSIS_DIR = REPO_ROOT / "outputs" / "analysis" / "robot8_20260721_bas
 
 ACTION_DIM = 23
 BASE_SLICE = slice(20, 23)
-FPS = 20.0
-DT = 1.0 / FPS
+# Keep the historical 20 Hz default for existing V2 datasets, but make the
+# reconstruction clock explicit.  The raw-bag replay must use the *same*
+# timestep as the source LeRobot dataset: otherwise the physical labels no
+# longer align frame-for-frame and their integrated velocity is wrong.
+DEFAULT_FPS = 20.0
 
 
 @dataclass(frozen=True)
 class V2Config:
-    fps: float = FPS
+    fps: float = DEFAULT_FPS
     # A plateau is deliberately stricter than V1's command-only stop: it must
     # be stationary in both command and measured physical velocity for 0.3 s.
     # The pose-spread gate makes these short but genuine stops reliable and
@@ -219,6 +222,15 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--output-dataset", type=Path, default=DEFAULT_OUTPUT_DATASET)
     parser.add_argument("--analysis-dir", type=Path, default=DEFAULT_ANALYSIS_DIR)
     parser.add_argument(
+        "--fps",
+        type=float,
+        default=DEFAULT_FPS,
+        help=(
+            "Sampling rate used by the source conversion and raw-bag replay. "
+            "It must exactly match source meta/info.json (default: 20)."
+        ),
+    )
+    parser.add_argument(
         "--preview-episodes",
         type=int,
         nargs="+",
@@ -286,6 +298,8 @@ def parse_excluded_bag_names(raw: str) -> set[str]:
 
 
 def build_config(args: argparse.Namespace) -> V2Config:
+    if not math.isfinite(args.fps) or args.fps <= 0:
+        raise SystemExit("--fps must be a finite positive number")
     if args.smooth_window < 1 or args.smooth_window % 2 == 0:
         raise SystemExit("--smooth-window must be a positive odd integer")
     if args.anchor_min_frames < 6:
@@ -314,6 +328,7 @@ def build_config(args: argparse.Namespace) -> V2Config:
     ):
         raise SystemExit("--secondary-smooth-window must be 0 or an odd integer >= 3")
     return V2Config(
+        fps=args.fps,
         smooth_window=args.smooth_window,
         anchor_min_frames=args.anchor_min_frames,
         smooth_max_path_deviation_m=args.smooth_max_path_deviation_m,
@@ -407,8 +422,9 @@ def read_raw_episode(
     converter: ModuleType,
     bag_path: Path,
     episode_index: int,
+    fps: float,
 ) -> RawEpisode:
-    """Replay the converter's 20 Hz sampling and return physical odom data."""
+    """Replay the converter's source-dataset sampling and return physical odom."""
     camera_names = ["head_cam", "left_arm_cam", "right_arm_cam"]
     topics = converter.enabled_topics(camera_names)
     topic_set = set(topics)
@@ -436,7 +452,7 @@ def read_raw_episode(
     arrays = {topic: np.asarray(values, dtype=np.int64) for topic, values in topic_times.items()}
     t_start = max(values[0] for values in arrays.values())
     t_end = min(values[-1] for values in arrays.values())
-    step_ns = int(1e9 / FPS)
+    step_ns = int(1e9 / fps)
     if t_end <= t_start:
         raise RuntimeError(f"{bag_path} has no common topic time range")
     sample_times = t_start + np.arange((t_end - t_start) // step_ns + 1, dtype=np.int64) * step_ns
@@ -1789,6 +1805,17 @@ def main() -> None:
     if args.episodes is not None and not args.dry_run:
         raise SystemExit("V2 has a single physical action semantic; subset output is unsafe. Use --dry-run for subsets.")
 
+    try:
+        source_info = json.loads((source / "meta" / "info.json").read_text(encoding="utf-8"))
+        source_fps = float(source_info["fps"])
+    except (FileNotFoundError, KeyError, TypeError, ValueError, json.JSONDecodeError) as exc:
+        raise RuntimeError(f"Could not read a valid source dataset fps from {source / 'meta' / 'info.json'}") from exc
+    if not math.isclose(source_fps, config.fps, rel_tol=0.0, abs_tol=1e-9):
+        raise SystemExit(
+            "--fps must match source meta/info.json exactly: "
+            f"requested={config.fps:g}, source={source_fps:g}"
+        )
+
     data_paths = sorted((source / "data").rglob("*.parquet"))
     if len(data_paths) != 1:
         raise RuntimeError(f"expected exactly one source data parquet, found {len(data_paths)}")
@@ -1826,13 +1853,18 @@ def main() -> None:
         f"Mode:   {'dry-run' if args.dry_run else f'create derived {config.dataset_version} dataset'}",
         flush=True,
     )
-    print(f"Frames: {len(source_table)}, episodes: {len(bounds)}", flush=True)
+    print(f"Frames: {len(source_table)}, episodes: {len(bounds)}, fps: {config.fps:g}", flush=True)
     started = time.monotonic()
 
     raw_episodes: list[RawEpisode] = []
     for bag_path, (episode, start, end) in zip(bag_paths, bounds, strict=True):
         print(f"[odom {episode:02d}/{len(bounds) - 1:02d}] {bag_path}", flush=True)
-        raw = read_raw_episode(converter=converter, bag_path=bag_path, episode_index=episode)
+        raw = read_raw_episode(
+            converter=converter,
+            bag_path=bag_path,
+            episode_index=episode,
+            fps=config.fps,
+        )
         expected_frames = end - start
         if len(raw.odom_pose) != expected_frames:
             raise AssertionError(
@@ -1906,6 +1938,7 @@ def main() -> None:
         "source_dataset": str(source),
         "output_dataset": str(destination),
         "dry_run": bool(args.dry_run),
+        "fps": config.fps,
         "frames": len(source_table),
         "episodes": len(bounds),
         "excluded_bags": sorted(excluded),

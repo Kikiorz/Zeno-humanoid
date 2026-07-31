@@ -455,6 +455,7 @@ def process_single_bag(
     head_stereo_rectifier: object | None,
     head_stereo_resize_mode: str,
     max_frames: int | None,
+    fail_on_dropped_images: bool,
     frozen_indices: tuple[int, ...],
 ) -> list[dict] | None:
     print(f"\n[Bag {bag_idx}/{total_bags}] Processing: {bag_path}")
@@ -677,6 +678,11 @@ def process_single_bag(
                 frames.append(frame)
 
             elapsed = time.time() - bag_start
+            if dropped_images and fail_on_dropped_images:
+                raise RuntimeError(
+                    f"refusing a frame-misaligned conversion: {dropped_images} sampled frame(s) "
+                    "had an image decode/rectification failure"
+                )
             print(
                 f"  Done: {len(frames)} frames in {elapsed:.1f}s; "
                 f"dropped-images={dropped_images}"
@@ -846,6 +852,14 @@ def main() -> None:
         type=int,
         default=None,
         help="Optional frame limit per bag for smoke tests",
+    )
+    parser.add_argument(
+        "--fail-on-dropped-images",
+        action="store_true",
+        help=(
+            "Fail a bag instead of silently omitting sampled frames whose images cannot be decoded. "
+            "Required when downstream labels must remain frame-aligned to the original ROS bag."
+        ),
     )
     parser.add_argument(
         "--robot-type",
@@ -1074,6 +1088,7 @@ def main() -> None:
             head_stereo_rectifier=head_stereo_rectifier,
             head_stereo_resize_mode=args.head_stereo_resize_mode,
             max_frames=args.max_frames,
+            fail_on_dropped_images=args.fail_on_dropped_images,
             frozen_indices=frozen_indices,
         )
         if result is not None:

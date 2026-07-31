@@ -55,9 +55,17 @@ def dataset_info(root: Path) -> dict:
     fps = info.get("fps")
     episodes = info.get("total_episodes")
     frames = info.get("total_frames")
-    if fps != 20 or not isinstance(episodes, int) or episodes <= 0 or not isinstance(frames, int) or frames <= 0:
+    if (
+        isinstance(fps, bool)
+        or not isinstance(fps, (int, float))
+        or fps <= 0
+        or not isinstance(episodes, int)
+        or episodes <= 0
+        or not isinstance(frames, int)
+        or frames <= 0
+    ):
         raise RuntimeError(
-            f"Dataset metadata must be a non-empty 20Hz dataset for {root}: "
+            f"Dataset metadata must be a non-empty dataset with a positive fps for {root}: "
             f"fps={fps!r}, total_episodes={episodes!r}, total_frames={frames!r}"
         )
     for key in CAMERA_KEYS:

@@ -41,6 +41,10 @@ LOG_PATH="${LOG_DIR}/train.log"
 # training-only observation.dino_features key. The policy then keeps all of
 # its normal parameters/checkpoint keys but skips the repeated DINO forward.
 DINO_FEATURE_CACHE_MANIFEST="${DINO_FEATURE_CACHE_MANIFEST:-}"
+# For a frozen-DINO disk cache larger than RAM, contiguous cache-locality
+# batches avoid random mmap page faults.  Keep it opt-in so historical runs
+# retain their shuffled sampler semantics.
+DINO_CACHE_LOCALITY_BATCH_SIZE="${DINO_CACHE_LOCALITY_BATCH_SIZE:-}"
 
 # Be explicit about the full 23-D objective.  This differs from the old
 # frozen-torso profiles, whose first two weights were zero.
@@ -92,6 +96,17 @@ if (( BATCH_SIZE * NUM_PROCESSES != GLOBAL_BATCH_SIZE )); then
     "${BATCH_SIZE}" "${NUM_PROCESSES}" "${GLOBAL_BATCH_SIZE}" >&2
   exit 1
 fi
+if [[ -n "${DINO_CACHE_LOCALITY_BATCH_SIZE}" ]]; then
+  if ! [[ "${DINO_CACHE_LOCALITY_BATCH_SIZE}" =~ ^[0-9]+$ ]] || (( DINO_CACHE_LOCALITY_BATCH_SIZE < 1 )); then
+    printf 'DINO_CACHE_LOCALITY_BATCH_SIZE must be a positive integer when set.\n' >&2
+    exit 1
+  fi
+  if (( DINO_CACHE_LOCALITY_BATCH_SIZE % BATCH_SIZE != 0 || DINO_CACHE_LOCALITY_BATCH_SIZE % GLOBAL_BATCH_SIZE != 0 )); then
+    printf 'DINO_CACHE_LOCALITY_BATCH_SIZE must be divisible by both batch (%s) and global batch (%s).\n' \
+      "${BATCH_SIZE}" "${GLOBAL_BATCH_SIZE}" >&2
+    exit 1
+  fi
+fi
 if [[ -n "${ACTION_LOSS_WEIGHT_SCHEDULE_STEPS}" || -n "${ACTION_LOSS_WEIGHT_SCHEDULE_VALUES}" ]]; then
   if [[ -z "${ACTION_LOSS_WEIGHT_SCHEDULE_STEPS}" || -z "${ACTION_LOSS_WEIGHT_SCHEDULE_VALUES}" ]]; then
     printf 'ACTION_LOSS_WEIGHT_SCHEDULE_STEPS and ACTION_LOSS_WEIGHT_SCHEDULE_VALUES must be supplied together.\n' >&2
@@ -127,6 +142,7 @@ printf '%s\n' \
   "DINOV2_PRETRAINED_WEIGHTS=${DINOV2_PRETRAINED_WEIGHTS:-none}" \
   "DINOV2_TRAIN_BACKBONE=${DINOV2_TRAIN_BACKBONE}" \
   "DINO_FEATURE_CACHE_MANIFEST=${DINO_FEATURE_CACHE_MANIFEST:-none}" \
+  "DINO_CACHE_LOCALITY_BATCH_SIZE=${DINO_CACHE_LOCALITY_BATCH_SIZE:-none}" \
   "N_DECODER_LAYERS=7" \
   "ACTION_LOSS_WEIGHTS=${ACTION_LOSS_WEIGHTS}" \
   "ACTION_LOSS_WEIGHT_SCHEDULE_STEPS=${ACTION_LOSS_WEIGHT_SCHEDULE_STEPS:-none}" \
@@ -191,6 +207,9 @@ fi
 
 if [[ -n "${DINO_FEATURE_CACHE_MANIFEST}" ]]; then
   cmd+=("--dataset.dino_feature_cache_manifest=${DINO_FEATURE_CACHE_MANIFEST}")
+fi
+if [[ -n "${DINO_CACHE_LOCALITY_BATCH_SIZE}" ]]; then
+  cmd+=("--dataset.dino_cache_locality_batch_size=${DINO_CACHE_LOCALITY_BATCH_SIZE}")
 fi
 
 printf '%q ' "${cmd[@]}" >"${LOG_DIR}/command.txt"
