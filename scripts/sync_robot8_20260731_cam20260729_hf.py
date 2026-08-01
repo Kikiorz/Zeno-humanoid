@@ -14,6 +14,7 @@ from __future__ import annotations
 
 import argparse
 import json
+import os
 import tempfile
 from dataclasses import dataclass
 from pathlib import Path
@@ -74,6 +75,25 @@ RUNS = (
 
 def selected_runs(which: str) -> Iterable[Run]:
     return RUNS if which == "both" else tuple(run for run in RUNS if run.key == which)
+
+
+def configure_hf_transport() -> None:
+    """Make Hub downloads reliable on workstations using a local SOCKS proxy.
+
+    Some client stacks accept only the standard socks5:// spelling, while the
+    local environment exports socks://. In that situation Xet can create many
+    stalled streams for large safetensors, so use ordinary resumable LFS unless
+    the caller explicitly chose another setting.
+    """
+
+    normalized_socks_proxy = False
+    for name in ("ALL_PROXY", "all_proxy"):
+        value = os.environ.get(name)
+        if value and value.startswith("socks://"):
+            os.environ[name] = "socks5://" + value.removeprefix("socks://")
+            normalized_socks_proxy = True
+    if normalized_socks_proxy:
+        os.environ.setdefault("HF_HUB_DISABLE_XET", "1")
 
 
 def parse_steps(raw: str | None) -> tuple[int, ...] | None:
@@ -247,6 +267,7 @@ def parse_args() -> argparse.Namespace:
 
 def main() -> None:
     args = parse_args()
+    configure_hf_transport()
     root = args.artifact_root.resolve()
     for run in selected_runs(args.only):
         steps = args.steps or run.default_steps
