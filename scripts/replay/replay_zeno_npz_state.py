@@ -1,31 +1,26 @@
 #!/usr/bin/env python3
-"""Replay a Zeno 23-D ``state`` array through the normal deploy command topic.
+"""Replay an NPZ through the normal 24-D Robot8 auto whole-body topic.
 
-This is deliberately a single-file ROS2 tool: it does not load a model, start a
-worker, or need images.  It reads only ``timestamp_s`` and ``state`` from an
-NPZ and publishes the exact deploy ABI:
+This is deliberately a single-file ROS2 worker: it does not load a model,
+start a socket worker, or need images.  The source recording is resampled to
+the 20 Hz deployment clock and emits the same deploy ABI as the model bridge:
 
     /zeno/h1/auto/wholebody/cmd
     std_msgs/msg/Float64MultiArray
-    [control_mode, state[0], ..., state[22]]
+    [1.0, state[0:20], action[20:23]]
 
-The source recording is normally about 30 Hz.  The output is linearly
-resampled on a 20 Hz clock by default, matching the deployment bridge.  The
-last three state values are replayed verbatim as base vx, vy, and yaw-rate, as
-requested; they are recorded odometry velocities, not the original low-level
-twist commands.
+The split data source is intentional.  The first 20 values are joint state
+positions.  The final three values come from the NPZ action tail, whose source
+is the recorded ``/zeno/h1/twist/cmd``; state[20:23] are only measured odom
+velocities and are not published as base commands.
 
-Safe usage (preview only, no ROS publisher is created):
-
-    python3 replay_zeno_npz_state.py
-
-Actual robot output (after sourcing ROS2):
+By request, execution publishes immediately by default after live preflight
+checks.  Use ``--dry-run`` only when a non-publishing preview is wanted:
 
     source /opt/ros/humble/setup.bash
-    /usr/bin/python3 replay_zeno_npz_state.py --publish --unsafe-raw-state-base
+    /usr/bin/python3 replay_zeno_npz_state.py
 
-Use --npz to select another file.  --publish is intentionally explicit.  On
-normal exit or Ctrl-C the script sends the deploy idle command ``[0.0] * 24``.
+On normal exit or Ctrl-C the script sends the deployment idle ``[0.0] * 24``.
 """
 
 from __future__ import annotations
@@ -42,9 +37,10 @@ from typing import Any, Sequence
 import numpy as np
 
 
-ACTION_DIM = 23
-COMMAND_DIM = 24
+VECTOR_DIM = 23
 UPPER_BODY_DIM = 20
+BASE_DIM = 3
+COMMAND_DIM = 24
 DEFAULT_CMD_TOPIC = "/zeno/h1/auto/wholebody/cmd"
 DEFAULT_NPZ = "/home/zeno-rp/2027icra/Data/replay/8.1DEMO-1_full_merged_smoothed.npz"
 IDLE_PUBLISH_REPEATS = 3
@@ -84,6 +80,7 @@ JOINT_TOPIC_PARAMS = {
 class SourceState:
     timestamps_s: np.ndarray
     states: np.ndarray
+    actions: np.ndarray
     path: Path
 
 
@@ -91,28 +88,30 @@ class SourceState:
 class ReplayTrajectory:
     """Commands on the deployment-rate timeline.
 
-    ``times_s`` remains on the original NPZ clock.  If optional transition
-    frames are inserted, neighbouring values may share a timestamp because the
-    inserted safety ramp intentionally lengthens wall-clock playback.
+    ``times_s`` remains on the original NPZ clock.  ``upper_states`` comes
+    from NPZ state[0:20], and ``base_twists`` comes from NPZ action[20:23].
+    If optional transition frames are inserted, neighbouring values may share
+    a timestamp because the inserted safety ramp lengthens wall-clock replay.
     """
 
     times_s: np.ndarray
-    states: np.ndarray
+    upper_states: np.ndarray
+    base_twists: np.ndarray
     rate_hz: float
 
 
 def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(
         description=(
-            "Replay NPZ state as 24-D Robot8 deployment commands: "
-            "[control_mode, state_23d].  The NPZ action array is never used."
+            "Replay [state[0:20], action[20:23]] to the normal 24-D "
+            "/zeno/h1/auto/wholebody/cmd deploy topic. Publishes by default."
         ),
         formatter_class=argparse.ArgumentDefaultsHelpFormatter,
     )
     parser.add_argument(
         "--npz",
         default=DEFAULT_NPZ,
-        help="NPZ containing timestamp_s[N] and state[N,23].",
+        help="NPZ containing timestamp_s[N], state[N,23], and action[N,23].",
     )
     parser.add_argument("--cmd-topic", default=DEFAULT_CMD_TOPIC)
     parser.add_argument(
@@ -134,33 +133,18 @@ def parse_args() -> argparse.Namespace:
         help="Optional duration from --start-offset-s.",
     )
     parser.add_argument("--max-frames", type=int, default=None)
-    parser.add_argument("--control-mode", type=float, default=1.0)
     parser.add_argument(
-        "--base-mode",
-        choices=("state", "zero"),
-        default="state",
-        help=(
-            "state: put state[20:23] into the command; zero: keep the base stopped "
-            "while replaying state[0:20]."
-        ),
-    )
-    parser.add_argument(
-        "--unsafe-raw-state-base",
+        "--dry-run",
         action="store_true",
-        help=(
-            "Required with --publish --base-mode state. Acknowledges that state[20:23] "
-            "are measured odometry velocities sent directly without the V3 feedback mapper."
-        ),
+        help="Preview commands without creating ROS publishers. Default publishes after preflight.",
     )
-    parser.add_argument(
-        "--publish",
-        action="store_true",
-        help="Actually publish robot commands.  Default is a local dry-run preview only.",
-    )
+    # Compatibility with the previous revision: publishing is already the
+    # default, so this flag is intentionally a no-op.
+    parser.add_argument("--publish", dest="dry_run", action="store_false", help=argparse.SUPPRESS)
     parser.add_argument(
         "--dry-run-realtime",
         action="store_true",
-        help="In dry-run, keep 20 Hz wall-clock timing instead of printing a quick preview.",
+        help="In --dry-run, keep 20 Hz wall-clock timing instead of printing a quick preview.",
     )
     parser.add_argument(
         "--discovery-wait-s",
@@ -171,7 +155,7 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument(
         "--allow-no-command-subscriber",
         action="store_true",
-        help="Permit --publish even if no subscriber matches --cmd-topic after discovery wait.",
+        help="Permit publishing even if no subscriber matches --cmd-topic.",
     )
     parser.add_argument(
         "--allow-unchecked-start",
@@ -223,26 +207,29 @@ def load_source_state(raw_path: str) -> SourceState:
         raise FileNotFoundError(f"NPZ file does not exist: {path}")
 
     with np.load(path, allow_pickle=False) as archive:
-        missing = [name for name in ("timestamp_s", "state") if name not in archive]
+        missing = [name for name in ("timestamp_s", "state", "action") if name not in archive]
         if missing:
             raise ValueError(f"NPZ is missing required array(s): {', '.join(missing)}")
         timestamps_s = np.asarray(archive["timestamp_s"], dtype=np.float64)
         states = np.asarray(archive["state"], dtype=np.float64)
+        actions = np.asarray(archive["action"], dtype=np.float64)
 
     if timestamps_s.ndim != 1:
         raise ValueError(f"timestamp_s must have shape [N], got {timestamps_s.shape}")
-    if states.ndim != 2 or states.shape[1] != ACTION_DIM:
-        raise ValueError(f"state must have shape [N,{ACTION_DIM}], got {states.shape}")
-    if len(timestamps_s) != len(states) or len(states) < 2:
+    if states.ndim != 2 or states.shape[1] != VECTOR_DIM:
+        raise ValueError(f"state must have shape [N,{VECTOR_DIM}], got {states.shape}")
+    if actions.ndim != 2 or actions.shape[1] != VECTOR_DIM:
+        raise ValueError(f"action must have shape [N,{VECTOR_DIM}], got {actions.shape}")
+    if len(timestamps_s) != len(states) or len(timestamps_s) != len(actions) or len(states) < 2:
         raise ValueError(
-            "timestamp_s and state must have the same length, with at least two frames: "
-            f"timestamps={len(timestamps_s)}, states={len(states)}"
+            "timestamp_s, state, and action must have the same length, with at least two frames: "
+            f"timestamps={len(timestamps_s)}, states={len(states)}, actions={len(actions)}"
         )
-    if not np.isfinite(timestamps_s).all() or not np.isfinite(states).all():
-        raise ValueError("timestamp_s and state must contain only finite values")
+    if not np.isfinite(timestamps_s).all() or not np.isfinite(states).all() or not np.isfinite(actions).all():
+        raise ValueError("timestamp_s, state, and action must contain only finite values")
     if np.any(np.diff(timestamps_s) <= 0.0):
         raise ValueError("timestamp_s must be strictly increasing")
-    return SourceState(timestamps_s=timestamps_s, states=states, path=path)
+    return SourceState(timestamps_s=timestamps_s, states=states, actions=actions, path=path)
 
 
 def build_trajectory(
@@ -270,18 +257,28 @@ def build_trajectory(
     if end_s < start_s:
         raise ValueError("no source time remains after applying start/duration")
 
-    # A regular 20 Hz target clock follows the deployment bridge.  Round the
-    # end *up* to the next deployment tick so the final source state is not
-    # silently omitted when the recording ends between 20 Hz ticks.  np.interp
-    # holds that last state for the fractional tail; action is never used.
+    # A regular 20 Hz target clock follows deployment.  Round the end *up* to
+    # the next tick so the final source values are not silently omitted.  The
+    # upper body intentionally comes from state; base commands intentionally
+    # come from action's Twist tail.  Position state is linearly resampled;
+    # Twist uses causal zero-order hold so command steps are never invented.
     frame_count = int(math.ceil((end_s - start_s) * rate_hz - 1e-9)) + 1
     if max_frames is not None:
         frame_count = min(frame_count, max_frames)
     times_s = start_s + np.arange(frame_count, dtype=np.float64) / rate_hz
-    states = np.empty((frame_count, ACTION_DIM), dtype=np.float64)
-    for index in range(ACTION_DIM):
-        states[:, index] = np.interp(times_s, source.timestamps_s, source.states[:, index])
-    return ReplayTrajectory(times_s=times_s, states=states, rate_hz=rate_hz)
+    upper_states = np.empty((frame_count, UPPER_BODY_DIM), dtype=np.float64)
+    base_twists = np.empty((frame_count, BASE_DIM), dtype=np.float64)
+    for index in range(UPPER_BODY_DIM):
+        upper_states[:, index] = np.interp(times_s, source.timestamps_s, source.states[:, index])
+    base_indices = np.searchsorted(source.timestamps_s, times_s, side="right") - 1
+    base_indices = np.clip(base_indices, 0, len(source.timestamps_s) - 1)
+    base_twists[:, :] = source.actions[base_indices, UPPER_BODY_DIM:]
+    return ReplayTrajectory(
+        times_s=times_s,
+        upper_states=upper_states,
+        base_twists=base_twists,
+        rate_hz=rate_hz,
+    )
 
 
 def add_large_jump_transitions(
@@ -301,35 +298,35 @@ def add_large_jump_transitions(
         raise ValueError("--transition-s must be finite and non-negative")
     if not math.isfinite(threshold_rad) or threshold_rad <= 0.0:
         raise ValueError("--transition-threshold-rad must be finite and positive")
-    if transition_s == 0.0 or len(trajectory.states) < 2:
+    if transition_s == 0.0 or len(trajectory.upper_states) < 2:
         return trajectory
 
     transition_steps = max(1, int(math.ceil(transition_s * trajectory.rate_hz)))
-    output_states: list[np.ndarray] = [trajectory.states[0]]
+    output_upper_states: list[np.ndarray] = [trajectory.upper_states[0]]
+    output_base_twists: list[np.ndarray] = [trajectory.base_twists[0]]
     output_times: list[float] = [float(trajectory.times_s[0])]
-    for index in range(1, len(trajectory.states)):
-        previous = output_states[-1]
-        target = trajectory.states[index]
-        max_upper_body_delta = float(np.max(np.abs(target[:UPPER_BODY_DIM] - previous[:UPPER_BODY_DIM])))
+    for index in range(1, len(trajectory.upper_states)):
+        previous_upper = output_upper_states[-1]
+        previous_base = output_base_twists[-1]
+        target_upper = trajectory.upper_states[index]
+        target_base = trajectory.base_twists[index]
+        max_upper_body_delta = float(np.max(np.abs(target_upper - previous_upper)))
         if max_upper_body_delta > threshold_rad:
             for fraction in np.linspace(1.0 / transition_steps, 1.0, transition_steps):
-                # Only positions are intentionally ramped.  The final three
-                # dimensions are base velocities and remain the source target
-                # for this tick instead of being silently altered by a joint
-                # discontinuity workaround.
-                ramped = target.copy()
-                ramped[:UPPER_BODY_DIM] = (
-                    previous[:UPPER_BODY_DIM]
-                    + fraction * (target[:UPPER_BODY_DIM] - previous[:UPPER_BODY_DIM])
-                )
-                output_states.append(ramped)
+                ramped_upper = previous_upper + fraction * (target_upper - previous_upper)
+                # The base trajectory is not altered by an upper-body safety
+                # ramp.  Keep its previous Twist until the target frame.
+                output_upper_states.append(ramped_upper)
+                output_base_twists.append(target_base if fraction == 1.0 else previous_base)
                 output_times.append(float(trajectory.times_s[index]))
         else:
-            output_states.append(target)
+            output_upper_states.append(target_upper)
+            output_base_twists.append(target_base)
             output_times.append(float(trajectory.times_s[index]))
     return ReplayTrajectory(
         times_s=np.asarray(output_times, dtype=np.float64),
-        states=np.asarray(output_states, dtype=np.float64),
+        upper_states=np.asarray(output_upper_states, dtype=np.float64),
+        base_twists=np.asarray(output_base_twists, dtype=np.float64),
         rate_hz=trajectory.rate_hz,
     )
 
@@ -347,39 +344,36 @@ def zero_arm_plateaus(source: SourceState, minimum_frames: int = 20) -> list[tup
 
 
 def max_upper_body_step(trajectory: ReplayTrajectory) -> tuple[int, float]:
-    if len(trajectory.states) < 2:
+    if len(trajectory.upper_states) < 2:
         return 0, 0.0
-    deltas = np.max(np.abs(np.diff(trajectory.states[:, :UPPER_BODY_DIM], axis=0)), axis=1)
+    deltas = np.max(np.abs(np.diff(trajectory.upper_states, axis=0)), axis=1)
     index = int(np.argmax(deltas)) + 1
     return index, float(deltas[index - 1])
 
 
-def format_state(state: Sequence[float]) -> str:
+def format_command(upper_state: Sequence[float], base_twist: Sequence[float]) -> str:
     head = ", ".join(
-        f"{name}={float(value):.4f}" for name, value in zip(ACTION_FIELDS[:6], state[:6], strict=True)
+        f"{name}={float(value):.4f}"
+        for name, value in zip(ACTION_FIELDS[:6], upper_state[:6], strict=True)
     )
     base = ", ".join(
         f"{name}={float(value):.4f}"
-        for name, value in zip(ACTION_FIELDS[-3:], state[-3:], strict=True)
+        for name, value in zip(ACTION_FIELDS[-3:], base_twist, strict=True)
     )
     return f"{head}, ..., {base}"
 
 
-def print_source_summary(
-    source: SourceState,
-    trajectory: ReplayTrajectory,
-    cmd_topic: str,
-    base_mode: str,
-) -> None:
+def print_source_summary(source: SourceState, trajectory: ReplayTrajectory, args: argparse.Namespace) -> None:
     native_dt_s = np.diff(source.timestamps_s)
     native_rate_hz = 1.0 / float(np.median(native_dt_s))
     print(
         f"[load] npz={source.path}\n"
-        f"[load] state={source.states.shape}, source_duration="
+        f"[load] state={source.states.shape}, action={source.actions.shape}, source_duration="
         f"{source.timestamps_s[-1] - source.timestamps_s[0]:.3f}s, native_rate≈{native_rate_hz:.3f}Hz\n"
-        f"[ready] output_frames={len(trajectory.states)}, rate={trajectory.rate_hz:g}Hz, "
-        f"output_duration={(len(trajectory.states) - 1) / trajectory.rate_hz:.3f}s\n"
-        f"[ready] message=[control_mode, state_23d], cmd_topic={cmd_topic}",
+        f"[ready] output_frames={len(trajectory.upper_states)}, rate={trajectory.rate_hz:g}Hz, "
+        f"output_duration={(len(trajectory.upper_states) - 1) / trajectory.rate_hz:.3f}s\n"
+        "[ready] Float64MultiArray=[1.0, state[0:20], action[20:23]]\n"
+        f"[ready] cmd_topic={args.cmd_topic}",
         flush=True,
     )
     for start, end in zero_arm_plateaus(source):
@@ -397,14 +391,11 @@ def print_source_summary(
             "--transition-s 0.5 (this explicitly changes timing, not the NPZ default).",
             flush=True,
         )
-    if base_mode == "state":
-        print(
-            "[note] state[20:23] are replayed verbatim as base_vx/base_vy/base_rotation. "
-            "They are recorded odometry velocities, not the original low-level twist action.",
-            flush=True,
-        )
-    else:
-        print("[note] --base-mode zero replaces state[20:23] with zero commands.", flush=True)
+    print(
+        "[note] upper body uses state[0:20]; the final base command slots use action[20:23] "
+        "from recorded Twist. state[20:23] odometry velocities are not published as commands.",
+        flush=True,
+    )
 
 
 def extract_joint_positions(message: Any, fields: Sequence[str]) -> list[float] | None:
@@ -430,7 +421,7 @@ def extract_joint_positions(message: Any, fields: Sequence[str]) -> list[float] 
 
 
 def create_ros_publisher(args: argparse.Namespace) -> tuple[Any, Any]:
-    """Create ROS objects only for --publish, so dry-run needs no ROS install."""
+    """Create the same auto whole-body publisher used by the deployment bridge."""
 
     try:
         import rclpy
@@ -441,7 +432,7 @@ def create_ros_publisher(args: argparse.Namespace) -> tuple[Any, Any]:
     except ImportError as exc:
         raise RuntimeError(
             "ROS2 Python packages are unavailable. Source ROS first, for example: "
-            "source /opt/ros/humble/setup.bash && /usr/bin/python3 replay_zeno_npz_state.py --publish"
+            "source /opt/ros/humble/setup.bash && /usr/bin/python3 replay_zeno_npz_state.py"
         ) from exc
 
     class CommandPublisher(Node):
@@ -477,13 +468,26 @@ def create_ros_publisher(args: argparse.Namespace) -> tuple[Any, Any]:
                     values.extend(current)
             return (values if not missing else None), missing
 
-        def publish_command(self, values: Sequence[float], control_mode: float) -> None:
-            if len(values) != ACTION_DIM:
-                raise ValueError(f"state command must contain {ACTION_DIM} values, got {len(values)}")
+        def command_subscriber_counts(self) -> dict[str, int]:
+            return {args.cmd_topic: int(self.publisher.get_subscription_count())}
+
+        def publish_frame(self, upper_state: Sequence[float], base_twist: Sequence[float]) -> None:
+            if len(upper_state) != UPPER_BODY_DIM:
+                raise ValueError(
+                    f"upper state command must contain {UPPER_BODY_DIM} values, got {len(upper_state)}"
+                )
+            if len(base_twist) != BASE_DIM:
+                raise ValueError(f"base action tail must contain {BASE_DIM} values, got {len(base_twist)}")
+            command = [1.0, *[float(value) for value in upper_state], *[float(value) for value in base_twist]]
+            if len(command) != COMMAND_DIM:
+                raise RuntimeError(f"whole-body command must contain {COMMAND_DIM} values, got {len(command)}")
             message = Float64MultiArray()
-            message.data = [float(control_mode), *[float(value) for value in values]]
-            if len(message.data) != COMMAND_DIM:
-                raise RuntimeError(f"command must contain {COMMAND_DIM} values, got {len(message.data)}")
+            message.data = command
+            self.publisher.publish(message)
+
+        def publish_idle(self) -> None:
+            message = Float64MultiArray()
+            message.data = [0.0] * COMMAND_DIM
             self.publisher.publish(message)
 
     # Keep ROS alive for our finally block: the default rclpy signal handler
@@ -505,14 +509,16 @@ def preflight_publish(rclpy_module: Any, node: Any, first_state: Sequence[float]
     """Wait for DDS/state input, then reject a mismatched absolute-pose start."""
 
     spin_for(rclpy_module, node, args.discovery_wait_s)
-    subscriber_count = int(node.publisher.get_subscription_count())
-    if subscriber_count == 0 and not args.allow_no_command_subscriber:
+    subscriber_counts = node.command_subscriber_counts()
+    missing_command_topics = [topic for topic, count in subscriber_counts.items() if count == 0]
+    if missing_command_topics and not args.allow_no_command_subscriber:
         raise RuntimeError(
-            f"no subscriber matched command topic {args.cmd_topic!r} after "
-            f"{args.discovery_wait_s:g}s; refusing to start. Use --allow-no-command-subscriber "
-            "only for a non-robot transport test."
+            "no subscriber matched whole-body command topic after "
+            f"{args.discovery_wait_s:g}s: {', '.join(missing_command_topics)}. Refusing to start. "
+            "Use --allow-no-command-subscriber only for a non-robot transport test."
         )
-    print(f"[preflight] matched command subscribers={subscriber_count}", flush=True)
+    count_text = ", ".join(f"{topic}={count}" for topic, count in subscriber_counts.items())
+    print(f"[preflight] matched command subscribers: {count_text}", flush=True)
 
     if args.allow_unchecked_start:
         print("[preflight] WARNING: skipped live start-pose check by explicit request.", flush=True)
@@ -550,54 +556,49 @@ def preflight_publish(rclpy_module: Any, node: Any, first_state: Sequence[float]
 
 
 def publish_idle(rclpy_module: Any, node: Any) -> None:
-    """Repeat the deploy idle command so a short DDS loss does not leave control active."""
+    """Repeat deployment idle so a short DDS loss does not leave control active."""
 
     if not rclpy_module.ok():
-        print("[publish] ROS context already stopped; could not send deploy idle command.", flush=True)
+        print("[publish] ROS context already stopped; could not send deployment idle.", flush=True)
         return
     for repeat in range(IDLE_PUBLISH_REPEATS):
-        node.publish_command([0.0] * ACTION_DIM, control_mode=0.0)
+        node.publish_idle()
         rclpy_module.spin_once(node, timeout_sec=0.0)
         if repeat + 1 < IDLE_PUBLISH_REPEATS:
             time.sleep(0.05)
 
 
-def command_from_state(state: np.ndarray, base_mode: str) -> np.ndarray:
-    command = np.asarray(state, dtype=np.float64).copy()
-    if base_mode == "zero":
-        command[-3:] = 0.0
-    return command
-
-
 def replay(trajectory: ReplayTrajectory, args: argparse.Namespace) -> None:
-    realtime = args.publish or args.dry_run_realtime
+    realtime = not args.dry_run or args.dry_run_realtime
     period_s = 1.0 / trajectory.rate_hz
     rclpy_module: Any | None = None
     node: Any | None = None
     completed = False
 
-    if args.publish:
+    if not args.dry_run:
         rclpy_module, node = create_ros_publisher(args)
 
     try:
         if node is not None:
-            preflight_publish(rclpy_module, node, trajectory.states[0], args)
+            preflight_publish(rclpy_module, node, trajectory.upper_states[0], args)
         start_wall_s = time.perf_counter()
-        for index, state in enumerate(trajectory.states):
-            command = command_from_state(state, args.base_mode)
+        for index, (upper_state, base_twist) in enumerate(
+            zip(trajectory.upper_states, trajectory.base_twists, strict=True)
+        ):
             if node is not None:
-                node.publish_command(command, args.control_mode)
+                node.publish_frame(upper_state, base_twist)
                 rclpy_module.spin_once(node, timeout_sec=0.0)
 
-            if index % args.log_every_n == 0 or index == len(trajectory.states) - 1:
-                mode = "publish" if args.publish else "dry-run"
+            if index % args.log_every_n == 0 or index == len(trajectory.upper_states) - 1:
+                mode = "publish" if not args.dry_run else "dry-run"
                 print(
-                    f"[{mode}] frame={index}/{len(trajectory.states) - 1} "
-                    f"source_time={trajectory.times_s[index]:.3f}s: {format_state(command)}",
+                    f"[{mode}] frame={index}/{len(trajectory.upper_states) - 1} "
+                    f"source_time={trajectory.times_s[index]:.3f}s: "
+                    f"{format_command(upper_state, base_twist)}",
                     flush=True,
                 )
 
-            if realtime and index + 1 < len(trajectory.states):
+            if realtime and index + 1 < len(trajectory.upper_states):
                 deadline_s = start_wall_s + (index + 1) * period_s
                 time.sleep(max(0.0, deadline_s - time.perf_counter()))
         completed = True
@@ -606,7 +607,7 @@ def replay(trajectory: ReplayTrajectory, args: argparse.Namespace) -> None:
             status = "after completion" if completed else "after interruption/failure"
             try:
                 publish_idle(rclpy_module, node)
-                print(f"[publish] sent {IDLE_PUBLISH_REPEATS} deploy idle command(s) {status}.", flush=True)
+                print(f"[publish] sent {IDLE_PUBLISH_REPEATS} deployment idle command(s) {status}.", flush=True)
             finally:
                 node.destroy_node()
                 if rclpy_module.ok():
@@ -615,8 +616,6 @@ def replay(trajectory: ReplayTrajectory, args: argparse.Namespace) -> None:
 
 def main() -> None:
     args = parse_args()
-    if not math.isfinite(args.control_mode):
-        raise SystemExit("--control-mode must be finite")
     if args.log_every_n <= 0:
         raise SystemExit("--log-every-n must be positive")
     if not math.isfinite(args.discovery_wait_s) or args.discovery_wait_s < 0.0:
@@ -625,13 +624,6 @@ def main() -> None:
         raise SystemExit("--preflight-timeout-s must be finite and positive")
     if not math.isfinite(args.start_max_position_error) or args.start_max_position_error <= 0.0:
         raise SystemExit("--start-max-position-error must be finite and positive")
-    if args.publish and args.base_mode == "state" and not args.unsafe_raw_state_base:
-        raise SystemExit(
-            "Refusing raw base replay: state[20:23] are odometry measurements, not low-level "
-            "base commands. Use --unsafe-raw-state-base to explicitly acknowledge direct state-base "
-            "publishing, or use --base-mode zero."
-        )
-
     source = load_source_state(args.npz)
     trajectory = build_trajectory(
         source,
@@ -640,22 +632,24 @@ def main() -> None:
         duration_s=args.duration_s,
         max_frames=args.max_frames,
     )
-    unsmoothed_frame_count = len(trajectory.states)
+    unsmoothed_frame_count = len(trajectory.upper_states)
     trajectory = add_large_jump_transitions(
         trajectory,
         transition_s=args.transition_s,
         threshold_rad=args.transition_threshold_rad,
     )
-    print_source_summary(source, trajectory, args.cmd_topic, args.base_mode)
-    inserted_frame_count = len(trajectory.states) - unsmoothed_frame_count
+    print_source_summary(source, trajectory, args)
+    inserted_frame_count = len(trajectory.upper_states) - unsmoothed_frame_count
     if inserted_frame_count:
         print(
             f"[ready] --transition-s inserted {inserted_frame_count} linear ramp frame(s); "
             f"wall-clock replay is {inserted_frame_count / trajectory.rate_hz:.3f}s longer.",
             flush=True,
         )
-    if not args.publish:
-        print("[ready] dry-run only; pass --publish to send robot commands.", flush=True)
+    if args.dry_run:
+        print("[ready] dry-run only; omit --dry-run to publish auto whole-body commands.", flush=True)
+    else:
+        print("[ready] publishing auto whole-body commands after preflight.", flush=True)
     # Match the deployment bridge: turn SIGTERM into a normal interruption so
     # the replay finally block has one chance to publish the idle command.
     def stop_handler(_signum: int, _frame: Any) -> None:
