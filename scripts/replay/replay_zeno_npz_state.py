@@ -9,16 +9,24 @@ the 20 Hz deployment clock and emits the same deploy ABI as the model bridge:
     std_msgs/msg/Float64MultiArray
     [1.0, state[0:20], action[20:23]]
 
-The split data source is intentional.  The first 20 values are joint state
-positions.  The final three values come from the NPZ action tail, whose source
-is the recorded ``/zeno/h1/twist/cmd``; state[20:23] are only measured odom
-velocities and are not published as base commands.
+The default ``--replay-source state`` retains the original trajectory-replay
+contract: the first 20 values are joint state positions and the final three
+values come from the NPZ action tail (recorded ``/zeno/h1/twist/cmd``).
+Measured ``state[20:23]`` odom velocities are never published as commands.
+
+For model-output NPZs, use ``--replay-source action``. That publishes all 23
+command dimensions directly from ``action`` and therefore mirrors an ACT
+deployment output rather than replaying the measured upper-body state.
 
 By request, execution publishes immediately by default after live preflight
 checks.  Use ``--dry-run`` only when a non-publishing preview is wanted:
 
     source /opt/ros/humble/setup.bash
     /usr/bin/python3 replay_zeno_npz_state.py
+
+    # Replay a model's full 23-D predicted command.
+    /usr/bin/python3 replay_zeno_npz_state.py --npz /path/model_output.npz \
+      --replay-source action
 
 On normal exit or Ctrl-C the script sends the deployment idle ``[0.0] * 24``.
 """
@@ -88,10 +96,12 @@ class SourceState:
 class ReplayTrajectory:
     """Commands on the deployment-rate timeline.
 
-    ``times_s`` remains on the original NPZ clock.  ``upper_states`` comes
-    from NPZ state[0:20], and ``base_twists`` comes from NPZ action[20:23].
-    If optional transition frames are inserted, neighbouring values may share
-    a timestamp because the inserted safety ramp lengthens wall-clock replay.
+    ``times_s`` remains on the original NPZ clock. With the default ``state``
+    source, ``upper_states`` comes from NPZ state[0:20] and ``base_twists``
+    from NPZ action[20:23]. With the ``action`` source, both come from the
+    23-D model action. If optional transition frames are inserted,
+    neighbouring values may share a timestamp because the inserted safety
+    ramp lengthens wall-clock replay.
     """
 
     times_s: np.ndarray
@@ -103,8 +113,8 @@ class ReplayTrajectory:
 def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(
         description=(
-            "Replay [state[0:20], action[20:23]] to the normal 24-D "
-            "/zeno/h1/auto/wholebody/cmd deploy topic. Publishes by default."
+            "Replay either [state[0:20], action[20:23]] (default) or full action[0:23] "
+            "to the normal 24-D /zeno/h1/auto/wholebody/cmd deploy topic. Publishes by default."
         ),
         formatter_class=argparse.ArgumentDefaultsHelpFormatter,
     )
@@ -112,6 +122,15 @@ def parse_args() -> argparse.Namespace:
         "--npz",
         default=DEFAULT_NPZ,
         help="NPZ containing timestamp_s[N], state[N,23], and action[N,23].",
+    )
+    parser.add_argument(
+        "--replay-source",
+        choices=("state", "action"),
+        default="state",
+        help=(
+            "state (default): publish [state[0:20], action[20:23]] for an edited trajectory; "
+            "action: publish action[0:23] for a model-output NPZ."
+        ),
     )
     parser.add_argument("--cmd-topic", default=DEFAULT_CMD_TOPIC)
     parser.add_argument(
@@ -189,7 +208,7 @@ def parse_args() -> argparse.Namespace:
         default=0.0,
         help=(
             "For an upper-body jump larger than --transition-threshold-rad, insert a "
-            "linear upper-body transition of this duration.  Zero preserves NPZ state exactly."
+            "linear upper-body transition of this duration. Zero preserves the selected NPZ source exactly."
         ),
     )
     parser.add_argument(
@@ -238,6 +257,7 @@ def build_trajectory(
     start_offset_s: float,
     duration_s: float | None,
     max_frames: int | None,
+    replay_source: str,
 ) -> ReplayTrajectory:
     if not math.isfinite(rate_hz) or rate_hz <= 0.0:
         raise ValueError("--rate-hz must be finite and positive")
@@ -247,6 +267,8 @@ def build_trajectory(
         raise ValueError("--duration-s must be finite and positive")
     if max_frames is not None and max_frames <= 0:
         raise ValueError("--max-frames must be positive")
+    if replay_source not in {"state", "action"}:
+        raise ValueError(f"unsupported replay source: {replay_source!r}")
 
     source_start_s = float(source.timestamps_s[0])
     source_end_s = float(source.timestamps_s[-1])
@@ -257,21 +279,25 @@ def build_trajectory(
     if end_s < start_s:
         raise ValueError("no source time remains after applying start/duration")
 
-    # A regular 20 Hz target clock follows deployment.  Round the end *up* to
-    # the next tick so the final source values are not silently omitted.  The
-    # upper body intentionally comes from state; base commands intentionally
-    # come from action's Twist tail.  Position state is linearly resampled;
-    # Twist uses causal zero-order hold so command steps are never invented.
+    # A regular 20 Hz target clock follows deployment. Round the end *up* to
+    # the next tick so the final source values are not silently omitted. State
+    # positions use linear resampling for legacy edited trajectories. A model
+    # action is a command rather than a measured pose, so it uses causal
+    # zero-order hold exactly like the base Twist: no command is invented
+    # between recorded deployment ticks.
     frame_count = int(math.ceil((end_s - start_s) * rate_hz - 1e-9)) + 1
     if max_frames is not None:
         frame_count = min(frame_count, max_frames)
     times_s = start_s + np.arange(frame_count, dtype=np.float64) / rate_hz
     upper_states = np.empty((frame_count, UPPER_BODY_DIM), dtype=np.float64)
     base_twists = np.empty((frame_count, BASE_DIM), dtype=np.float64)
-    for index in range(UPPER_BODY_DIM):
-        upper_states[:, index] = np.interp(times_s, source.timestamps_s, source.states[:, index])
     base_indices = np.searchsorted(source.timestamps_s, times_s, side="right") - 1
     base_indices = np.clip(base_indices, 0, len(source.timestamps_s) - 1)
+    if replay_source == "state":
+        for index in range(UPPER_BODY_DIM):
+            upper_states[:, index] = np.interp(times_s, source.timestamps_s, source.states[:, index])
+    else:
+        upper_states[:, :] = source.actions[base_indices, :UPPER_BODY_DIM]
     base_twists[:, :] = source.actions[base_indices, UPPER_BODY_DIM:]
     return ReplayTrajectory(
         times_s=times_s,
@@ -331,10 +357,13 @@ def add_large_jump_transitions(
     )
 
 
-def zero_arm_plateaus(source: SourceState, minimum_frames: int = 20) -> list[tuple[int, int]]:
-    """Find long exact-zero arm/gripper stretches for an explicit operator warning."""
+def zero_arm_plateaus(
+    source: SourceState, replay_source: str, minimum_frames: int = 20
+) -> list[tuple[int, int]]:
+    """Find long exact-zero arm/gripper stretches in the published source."""
 
-    all_zero = np.all(source.states[:, 4:UPPER_BODY_DIM] == 0.0, axis=1)
+    values = source.states if replay_source == "state" else source.actions
+    all_zero = np.all(values[:, 4:UPPER_BODY_DIM] == 0.0, axis=1)
     edges = np.flatnonzero(np.diff(np.concatenate(([False], all_zero, [False])).astype(np.int8)))
     return [
         (int(start), int(end))
@@ -366,19 +395,25 @@ def format_command(upper_state: Sequence[float], base_twist: Sequence[float]) ->
 def print_source_summary(source: SourceState, trajectory: ReplayTrajectory, args: argparse.Namespace) -> None:
     native_dt_s = np.diff(source.timestamps_s)
     native_rate_hz = 1.0 / float(np.median(native_dt_s))
+    command_layout = (
+        "[1.0, state[0:20], action[20:23]]"
+        if args.replay_source == "state"
+        else "[1.0, action[0:23]]"
+    )
     print(
         f"[load] npz={source.path}\n"
         f"[load] state={source.states.shape}, action={source.actions.shape}, source_duration="
         f"{source.timestamps_s[-1] - source.timestamps_s[0]:.3f}s, native_rate≈{native_rate_hz:.3f}Hz\n"
         f"[ready] output_frames={len(trajectory.upper_states)}, rate={trajectory.rate_hz:g}Hz, "
         f"output_duration={(len(trajectory.upper_states) - 1) / trajectory.rate_hz:.3f}s\n"
-        "[ready] Float64MultiArray=[1.0, state[0:20], action[20:23]]\n"
+        f"[ready] replay_source={args.replay_source}; Float64MultiArray={command_layout}\n"
         f"[ready] cmd_topic={args.cmd_topic}",
         flush=True,
     )
-    for start, end in zero_arm_plateaus(source):
+    source_label = "state" if args.replay_source == "state" else "action"
+    for start, end in zero_arm_plateaus(source, args.replay_source):
         print(
-            "[warning] state itself has an all-zero arm/gripper stretch: "
+            f"[warning] {source_label} itself has an all-zero arm/gripper stretch: "
             f"frames {start}:{end - 1}, source_time={source.timestamps_s[start]:.3f}.."
             f"{source.timestamps_s[end - 1]:.3f}s. It will be replayed as supplied.",
             flush=True,
@@ -391,11 +426,17 @@ def print_source_summary(source: SourceState, trajectory: ReplayTrajectory, args
             "--transition-s 0.5 (this explicitly changes timing, not the NPZ default).",
             flush=True,
         )
-    print(
-        "[note] upper body uses state[0:20]; the final base command slots use action[20:23] "
-        "from recorded Twist. state[20:23] odometry velocities are not published as commands.",
-        flush=True,
-    )
+    if args.replay_source == "state":
+        print(
+            "[note] upper body uses state[0:20]; the final base command slots use action[20:23] "
+            "from recorded Twist. state[20:23] odometry velocities are not published as commands.",
+            flush=True,
+        )
+    else:
+        print(
+            "[note] all 23 active command slots use action. This is the correct mode for a model-output NPZ.",
+            flush=True,
+        )
 
 
 def extract_joint_positions(message: Any, fields: Sequence[str]) -> list[float] | None:
@@ -631,6 +672,7 @@ def main() -> None:
         start_offset_s=args.start_offset_s,
         duration_s=args.duration_s,
         max_frames=args.max_frames,
+        replay_source=args.replay_source,
     )
     unsmoothed_frame_count = len(trajectory.upper_states)
     trajectory = add_large_jump_transitions(
