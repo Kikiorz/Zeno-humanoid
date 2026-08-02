@@ -34,7 +34,9 @@ On normal exit or Ctrl-C the script sends the deployment idle ``[0.0] * 24``.
 from __future__ import annotations
 
 import argparse
+import json
 import math
+import os
 import signal
 import sys
 import time
@@ -51,6 +53,7 @@ BASE_DIM = 3
 COMMAND_DIM = 24
 DEFAULT_CMD_TOPIC = "/zeno/h1/auto/wholebody/cmd"
 DEFAULT_NPZ = "/home/zeno-rp/2027icra/Data/replay/8.1DEMO-1_full_merged_smoothed.npz"
+DEFAULT_ACTUAL_STATE_OUTPUT_DIR = Path(DEFAULT_NPZ).parent
 IDLE_PUBLISH_REPEATS = 3
 
 TORSO_FIELDS = ["torso_lift", "torso_waist", "head_pan", "head_tilt"]
@@ -108,6 +111,130 @@ class ReplayTrajectory:
     upper_states: np.ndarray
     base_twists: np.ndarray
     rate_hz: float
+
+
+@dataclass
+class ActualStateCapture:
+    """Measured state samples paired with the exact replay command sent.
+
+    The capture is intentionally owned by the replay process.  It therefore
+    does not add a second subscriber to the auto-command topic and cannot
+    influence the replay script's command-subscriber preflight.
+    """
+
+    source_path: Path
+    output_path: Path
+    rate_hz: float
+    max_state_age_s: float
+    replay_source: str
+    timestamps_s: list[float]
+    source_times_s: list[float]
+    frame_indices: list[int]
+    states: list[np.ndarray]
+    actions: list[np.ndarray]
+    cache_ages_s: list[np.ndarray]
+    dropped_samples: dict[str, int]
+
+    @classmethod
+    def create(
+        cls,
+        source_path: Path,
+        output_path: Path,
+        rate_hz: float,
+        max_state_age_s: float,
+        replay_source: str,
+    ) -> "ActualStateCapture":
+        return cls(
+            source_path=source_path,
+            output_path=output_path,
+            rate_hz=rate_hz,
+            max_state_age_s=max_state_age_s,
+            replay_source=replay_source,
+            timestamps_s=[],
+            source_times_s=[],
+            frame_indices=[],
+            states=[],
+            actions=[],
+            cache_ages_s=[],
+            dropped_samples={},
+        )
+
+    def drop(self, reason: str) -> None:
+        self.dropped_samples[reason] = self.dropped_samples.get(reason, 0) + 1
+
+    def append(
+        self,
+        *,
+        replay_elapsed_s: float,
+        source_time_s: float,
+        frame_index: int,
+        state: np.ndarray,
+        action: np.ndarray,
+        cache_ages_s: np.ndarray,
+    ) -> None:
+        if state.shape != (VECTOR_DIM,) or action.shape != (VECTOR_DIM,):
+            raise ValueError(f"actual-state capture requires 23-D state/action, got {state.shape}/{action.shape}")
+        if cache_ages_s.shape != (6,):
+            raise ValueError(f"actual-state cache ages must be 6-D, got {cache_ages_s.shape}")
+        if not np.isfinite(state).all() or not np.isfinite(action).all() or not np.isfinite(cache_ages_s).all():
+            raise ValueError("actual-state capture received NaN/Inf")
+        self.timestamps_s.append(float(replay_elapsed_s))
+        self.source_times_s.append(float(source_time_s))
+        self.frame_indices.append(int(frame_index))
+        self.states.append(state.astype(np.float32, copy=True))
+        self.actions.append(action.astype(np.float32, copy=True))
+        self.cache_ages_s.append(cache_ages_s.astype(np.float32, copy=True))
+
+    def write(self) -> tuple[Path, Path] | None:
+        """Atomically save actual state and paired sent command after replay."""
+
+        if not self.states:
+            return None
+        self.output_path.parent.mkdir(parents=True, exist_ok=True)
+        temporary_path = self.output_path.with_name(
+            f".{self.output_path.stem}.{os.getpid()}.tmp.npz"
+        )
+        np.savez_compressed(
+            temporary_path,
+            # ``state`` is measured live feedback; ``action`` is the exact
+            # 23-D command built by this replay process for that row.
+            timestamp_s=np.asarray(self.timestamps_s, dtype=np.float64),
+            source_timestamp_s=np.asarray(self.source_times_s, dtype=np.float64),
+            replay_frame_index=np.asarray(self.frame_indices, dtype=np.int64),
+            state=np.stack(self.states).astype(np.float32, copy=False),
+            action=np.stack(self.actions).astype(np.float32, copy=False),
+            state_cache_age_s=np.stack(self.cache_ages_s).astype(np.float32, copy=False),
+            source=np.asarray(str(self.source_path)),
+            replay_source=np.asarray(self.replay_source),
+            state_fields=np.asarray(ACTION_FIELDS),
+            state_cache_order=np.asarray(
+                ("torso", "left_arm", "right_arm", "left_gripper", "right_gripper", "odom")
+            ),
+            sampling_contract=np.asarray(
+                "Actual 23-D feedback sampled in the replay process immediately after each 20-Hz "
+                "publish; action is the exact [upper_state, base_twist] command sent for that replay frame."
+            ),
+        )
+        temporary_path.replace(self.output_path)
+        summary_path = self.output_path.with_suffix(".json")
+        summary_path.write_text(
+            json.dumps(
+                {
+                    "source_npz": str(self.source_path),
+                    "output": str(self.output_path),
+                    "sample_count": len(self.states),
+                    "rate_hz_requested": self.rate_hz,
+                    "max_state_age_s": self.max_state_age_s,
+                    "replay_source": self.replay_source,
+                    "dropped_samples": self.dropped_samples,
+                },
+                ensure_ascii=False,
+                indent=2,
+            )
+            + "\n",
+            encoding="utf-8",
+        )
+        return self.output_path, summary_path
 
 
 def parse_args() -> argparse.Namespace:
@@ -201,6 +328,7 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--right-arm-state-topic", default="/zeno/h1/wheelarm/right_arm/joint_state")
     parser.add_argument("--left-gripper-state-topic", default="/zeno/h1/left_gripper/joint_state")
     parser.add_argument("--right-gripper-state-topic", default="/zeno/h1/right_gripper/joint_state")
+    parser.add_argument("--odom-topic", default="/zeno/h1/sensor/odom_raw")
     parser.add_argument("--log-every-n", type=int, default=20)
     parser.add_argument(
         "--transition-s",
@@ -216,6 +344,35 @@ def parse_args() -> argparse.Namespace:
         type=float,
         default=0.30,
         help="Upper-body per-frame jump that triggers optional --transition-s smoothing.",
+    )
+    parser.add_argument(
+        "--record-actual-state",
+        action="store_true",
+        help=(
+            "During replay, record fresh live JointState + odom feedback at the same 20 Hz loop and "
+            "save it to a separate NPZ with the exact 23-D command sent for every captured frame. "
+            "Stale feedback rows are skipped; use replay_frame_index to align the result."
+        ),
+    )
+    parser.add_argument(
+        "--actual-state-output",
+        type=Path,
+        default=None,
+        help=(
+            "NPZ written by --record-actual-state. Defaults to "
+            "Data/replay/<input-npz-stem>_actual_state.npz."
+        ),
+    )
+    parser.add_argument(
+        "--actual-state-max-age-s",
+        type=float,
+        default=0.25,
+        help="Skip capture rows if any live JointState/odom cache is older than this.",
+    )
+    parser.add_argument(
+        "--overwrite-actual-state",
+        action="store_true",
+        help="Allow --record-actual-state to replace an existing output NPZ and summary JSON.",
     )
     return parser.parse_args()
 
@@ -249,6 +406,32 @@ def load_source_state(raw_path: str) -> SourceState:
     if np.any(np.diff(timestamps_s) <= 0.0):
         raise ValueError("timestamp_s must be strictly increasing")
     return SourceState(timestamps_s=timestamps_s, states=states, actions=actions, path=path)
+
+
+def resolve_actual_state_output(source: SourceState, args: argparse.Namespace) -> Path | None:
+    """Resolve and protect the optional live-feedback capture path."""
+
+    if not args.record_actual_state:
+        return None
+    if args.dry_run:
+        raise ValueError("--record-actual-state requires publishing; remove --dry-run")
+    if not math.isfinite(args.actual_state_max_age_s) or args.actual_state_max_age_s <= 0.0:
+        raise ValueError("--actual-state-max-age-s must be finite and positive")
+    raw_output = args.actual_state_output
+    output = (
+        raw_output.expanduser().resolve()
+        if raw_output is not None
+        else (DEFAULT_ACTUAL_STATE_OUTPUT_DIR / f"{source.path.stem}_actual_state.npz").resolve()
+    )
+    if output == source.path:
+        raise ValueError("--actual-state-output must be a new NPZ, not the replay input NPZ")
+    summary = output.with_suffix(".json")
+    if not args.overwrite_actual_state and (output.exists() or summary.exists()):
+        existing = output if output.exists() else summary
+        raise FileExistsError(
+            f"actual-state output already exists: {existing}; pass --overwrite-actual-state to replace it"
+        )
+    return output
 
 
 def build_trajectory(
@@ -461,11 +644,23 @@ def extract_joint_positions(message: Any, fields: Sequence[str]) -> list[float] 
     return positions[: len(fields)]
 
 
+def extract_odom_velocity(message: Any) -> list[float] | None:
+    """Read the measured base-twist tail of the normal 23-D state."""
+
+    try:
+        twist = message.twist.twist
+        values = [float(twist.linear.x), float(twist.linear.y), float(twist.angular.z)]
+    except (AttributeError, TypeError, ValueError):
+        return None
+    return values if all(math.isfinite(value) for value in values) else None
+
+
 def create_ros_publisher(args: argparse.Namespace) -> tuple[Any, Any]:
     """Create the same auto whole-body publisher used by the deployment bridge."""
 
     try:
         import rclpy
+        from nav_msgs.msg import Odometry
         from rclpy.node import Node
         from rclpy.signals import SignalHandlerOptions
         from sensor_msgs.msg import JointState
@@ -483,11 +678,18 @@ def create_ros_publisher(args: argparse.Namespace) -> tuple[Any, Any]:
             # reliable and volatile in ROS2 Humble's default QoS profile.
             self.publisher = self.create_publisher(Float64MultiArray, args.cmd_topic, 10)
             self.current_joint_positions: dict[str, list[float]] = {}
+            self.current_joint_received_s: dict[str, float] = {}
+            self.current_odom_velocity: list[float] | None = None
+            self.current_odom_received_s: float | None = None
             self.subscriptions_keepalive = []
             for group, fields in REQUIRED_JOINTS.items():
                 topic = getattr(args, JOINT_TOPIC_PARAMS[group])
                 self.subscriptions_keepalive.append(
                     self.create_subscription(JointState, topic, self.joint_callback(group, fields), 10)
+                )
+            if args.record_actual_state:
+                self.subscriptions_keepalive.append(
+                    self.create_subscription(Odometry, args.odom_topic, self.odom_callback, 10)
                 )
 
         def joint_callback(self, group: str, fields: Sequence[str]) -> Any:
@@ -495,8 +697,15 @@ def create_ros_publisher(args: argparse.Namespace) -> tuple[Any, Any]:
                 values = extract_joint_positions(message, fields)
                 if values is not None and all(math.isfinite(value) for value in values):
                     self.current_joint_positions[group] = values
+                    self.current_joint_received_s[group] = time.monotonic()
 
             return callback
+
+        def odom_callback(self, message: Any) -> None:
+            values = extract_odom_velocity(message)
+            if values is not None:
+                self.current_odom_velocity = values
+                self.current_odom_received_s = time.monotonic()
 
         def current_upper_body(self) -> tuple[list[float] | None, list[str]]:
             values: list[float] = []
@@ -511,6 +720,39 @@ def create_ros_publisher(args: argparse.Namespace) -> tuple[Any, Any]:
 
         def command_subscriber_counts(self) -> dict[str, int]:
             return {args.cmd_topic: int(self.publisher.get_subscription_count())}
+
+        def current_actual_state(
+            self, max_age_s: float
+        ) -> tuple[np.ndarray | None, np.ndarray | None, str | None]:
+            """Return a fresh whole-body feedback snapshot for live capture."""
+
+            now_s = time.monotonic()
+            values: list[float] = []
+            ages_s: list[float] = []
+            for group in REQUIRED_JOINTS:
+                joint_values = self.current_joint_positions.get(group)
+                received_s = self.current_joint_received_s.get(group)
+                if joint_values is None or received_s is None:
+                    return None, None, f"missing:{group}"
+                age_s = now_s - received_s
+                if age_s < 0.0 or age_s > max_age_s:
+                    return None, None, f"stale:{group}"
+                values.extend(joint_values)
+                ages_s.append(age_s)
+            if self.current_odom_velocity is None or self.current_odom_received_s is None:
+                return None, None, "missing:odom"
+            odom_age_s = now_s - self.current_odom_received_s
+            if odom_age_s < 0.0 or odom_age_s > max_age_s:
+                return None, None, "stale:odom"
+            values.extend(self.current_odom_velocity)
+            ages_s.append(odom_age_s)
+            state = np.asarray(values, dtype=np.float32)
+            ages = np.asarray(ages_s, dtype=np.float32)
+            if state.shape != (VECTOR_DIM,):
+                return None, None, f"shape:{state.shape}"
+            if not np.isfinite(state).all():
+                return None, None, "nonfinite"
+            return state, ages, None
 
         def publish_frame(self, upper_state: Sequence[float], base_twist: Sequence[float]) -> None:
             if len(upper_state) != UPPER_BODY_DIM:
@@ -544,6 +786,20 @@ def spin_for(rclpy_module: Any, node: Any, duration_s: float) -> None:
         if remaining_s <= 0.0:
             return
         rclpy_module.spin_once(node, timeout_sec=min(0.05, remaining_s))
+
+
+def drain_callbacks(rclpy_module: Any, node: Any, max_callbacks: int = 32) -> None:
+    """Consume pending feedback callbacks before a live-state snapshot.
+
+    The normal replay path deliberately does not need a continuously spinning
+    executor.  When capture is requested, this bounded non-blocking drain
+    prevents the five fast JointState streams from sitting behind the 20 Hz
+    publish loop while leaving the control schedule unchanged.  The remaining
+    wait time is then spent in ``spin_for`` below.
+    """
+
+    for _ in range(max_callbacks):
+        rclpy_module.spin_once(node, timeout_sec=0.0)
 
 
 def preflight_publish(rclpy_module: Any, node: Any, first_state: Sequence[float], args: argparse.Namespace) -> None:
@@ -609,7 +865,11 @@ def publish_idle(rclpy_module: Any, node: Any) -> None:
             time.sleep(0.05)
 
 
-def replay(trajectory: ReplayTrajectory, args: argparse.Namespace) -> None:
+def replay(
+    trajectory: ReplayTrajectory,
+    args: argparse.Namespace,
+    actual_state_capture: ActualStateCapture | None = None,
+) -> None:
     realtime = not args.dry_run or args.dry_run_realtime
     period_s = 1.0 / trajectory.rate_hz
     rclpy_module: Any | None = None
@@ -623,12 +883,40 @@ def replay(trajectory: ReplayTrajectory, args: argparse.Namespace) -> None:
         if node is not None:
             preflight_publish(rclpy_module, node, trajectory.upper_states[0], args)
         start_wall_s = time.perf_counter()
+        capture_start_monotonic_s = time.monotonic()
         for index, (upper_state, base_twist) in enumerate(
             zip(trajectory.upper_states, trajectory.base_twists, strict=True)
         ):
             if node is not None:
                 node.publish_frame(upper_state, base_twist)
-                rclpy_module.spin_once(node, timeout_sec=0.0)
+                if actual_state_capture is None:
+                    rclpy_module.spin_once(node, timeout_sec=0.0)
+                else:
+                    # Keep the state queues current before snapshotting. This
+                    # is capture-only and is compensated by the same absolute
+                    # 20 Hz deadline below.
+                    drain_callbacks(rclpy_module, node)
+                    measured_state, cache_ages_s, reason = node.current_actual_state(
+                        actual_state_capture.max_state_age_s
+                    )
+                    if reason is not None:
+                        actual_state_capture.drop(reason)
+                    else:
+                        assert measured_state is not None and cache_ages_s is not None
+                        sent_action = np.concatenate(
+                            (
+                                np.asarray(upper_state, dtype=np.float32),
+                                np.asarray(base_twist, dtype=np.float32),
+                            )
+                        )
+                        actual_state_capture.append(
+                            replay_elapsed_s=time.monotonic() - capture_start_monotonic_s,
+                            source_time_s=float(trajectory.times_s[index]),
+                            frame_index=index,
+                            state=measured_state,
+                            action=sent_action,
+                            cache_ages_s=cache_ages_s,
+                        )
 
             if index % args.log_every_n == 0 or index == len(trajectory.upper_states) - 1:
                 mode = "publish" if not args.dry_run else "dry-run"
@@ -641,18 +929,43 @@ def replay(trajectory: ReplayTrajectory, args: argparse.Namespace) -> None:
 
             if realtime and index + 1 < len(trajectory.upper_states):
                 deadline_s = start_wall_s + (index + 1) * period_s
-                time.sleep(max(0.0, deadline_s - time.perf_counter()))
+                remaining_s = max(0.0, deadline_s - time.perf_counter())
+                if actual_state_capture is not None and node is not None:
+                    # Unlike plain replay, consume feedback throughout the
+                    # idle portion of the period so the next sample remains
+                    # fresh even though all state streams publish faster than
+                    # 20 Hz.
+                    spin_for(rclpy_module, node, remaining_s)
+                else:
+                    time.sleep(remaining_s)
         completed = True
     finally:
-        if node is not None:
-            status = "after completion" if completed else "after interruption/failure"
-            try:
+        try:
+            if node is not None:
+                status = "after completion" if completed else "after interruption/failure"
                 publish_idle(rclpy_module, node)
                 print(f"[publish] sent {IDLE_PUBLISH_REPEATS} deployment idle command(s) {status}.", flush=True)
+        finally:
+            try:
+                if actual_state_capture is not None:
+                    result = actual_state_capture.write()
+                    if result is None:
+                        print(
+                            "[capture] no fresh actual-state rows were recorded; no output NPZ written.",
+                            file=sys.stderr,
+                        )
+                    else:
+                        output, summary = result
+                        print(
+                            f"[capture] wrote {output} ({len(actual_state_capture.states)} actual-state rows)",
+                            flush=True,
+                        )
+                        print(f"[capture] summary {summary}", flush=True)
             finally:
-                node.destroy_node()
-                if rclpy_module.ok():
-                    rclpy_module.shutdown()
+                if node is not None:
+                    node.destroy_node()
+                    if rclpy_module.ok():
+                        rclpy_module.shutdown()
 
 
 def main() -> None:
@@ -666,6 +979,7 @@ def main() -> None:
     if not math.isfinite(args.start_max_position_error) or args.start_max_position_error <= 0.0:
         raise SystemExit("--start-max-position-error must be finite and positive")
     source = load_source_state(args.npz)
+    actual_state_output = resolve_actual_state_output(source, args)
     trajectory = build_trajectory(
         source,
         rate_hz=args.rate_hz,
@@ -688,6 +1002,20 @@ def main() -> None:
             f"wall-clock replay is {inserted_frame_count / trajectory.rate_hz:.3f}s longer.",
             flush=True,
         )
+    actual_state_capture = None
+    if actual_state_output is not None:
+        actual_state_capture = ActualStateCapture.create(
+            source_path=source.path,
+            output_path=actual_state_output,
+            rate_hz=trajectory.rate_hz,
+            max_state_age_s=args.actual_state_max_age_s,
+            replay_source=args.replay_source,
+        )
+        print(
+            f"[capture] enabled: real JointState + odom will be written to {actual_state_output}; "
+            f"freshness={args.actual_state_max_age_s:g}s",
+            flush=True,
+        )
     if args.dry_run:
         print("[ready] dry-run only; omit --dry-run to publish auto whole-body commands.", flush=True)
     else:
@@ -699,7 +1027,7 @@ def main() -> None:
 
     previous_sigterm = signal.signal(signal.SIGTERM, stop_handler)
     try:
-        replay(trajectory, args)
+        replay(trajectory, args, actual_state_capture)
     finally:
         signal.signal(signal.SIGTERM, previous_sigterm)
 
