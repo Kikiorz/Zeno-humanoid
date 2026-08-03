@@ -2,12 +2,13 @@
 """Replay an NPZ through the normal 24-D Robot8 auto whole-body topic.
 
 This is deliberately a single-file ROS2 worker: it does not load a model,
-start a socket worker, or need images.  The source recording is resampled to
-the 20 Hz deployment clock and emits the same deploy ABI as the model bridge:
+start a socket worker, or need images.  By default it follows the selected
+source's original timestamps exactly, and emits the same deploy ABI as the
+model bridge:
 
     /zeno/h1/auto/wholebody/cmd
     std_msgs/msg/Float64MultiArray
-    [1.0, state[0:20], action[20:23]]
+    [1.0, upper_body_20, base_twist_3]
 
 The default ``--replay-source state`` retains the original trajectory-replay
 contract: the first 20 values are joint state positions and the final three
@@ -28,6 +29,7 @@ checks.  Use ``--dry-run`` only when a non-publishing preview is wanted:
     /usr/bin/python3 replay_zeno_npz_state.py --npz /path/model_output.npz \
       --replay-source action
 
+Pass ``--rate-hz HZ`` only when an explicit fixed-rate resample is wanted.
 On normal exit or Ctrl-C the script sends the deployment idle ``[0.0] * 24``.
 """
 
@@ -89,17 +91,24 @@ JOINT_TOPIC_PARAMS = {
 
 @dataclass(frozen=True)
 class SourceState:
-    timestamps_s: np.ndarray
+    """Replay input with independent native state/action clocks when present."""
+
+    state_timestamps_s: np.ndarray
     states: np.ndarray
+    action_timestamps_s: np.ndarray
     actions: np.ndarray
+    state_base_twists: np.ndarray | None
     path: Path
+    native_timing_schema: bool
 
 
 @dataclass(frozen=True)
 class ReplayTrajectory:
-    """Commands on the deployment-rate timeline.
+    """Commands together with the wall-clock schedule used for publication.
 
-    ``times_s`` remains on the original NPZ clock. With the default ``state``
+    ``times_s`` remains on the original NPZ clock. ``schedule_times_s`` is
+    identical unless optional fixed-rate transition frames are inserted. With
+    the default ``state``
     source, ``upper_states`` comes from NPZ state[0:20] and ``base_twists``
     from NPZ action[20:23]. With the ``action`` source, both come from the
     23-D model action. If optional transition frames are inserted,
@@ -108,9 +117,11 @@ class ReplayTrajectory:
     """
 
     times_s: np.ndarray
+    schedule_times_s: np.ndarray
     upper_states: np.ndarray
     base_twists: np.ndarray
     rate_hz: float
+    source_timing: bool
 
 
 @dataclass
@@ -211,7 +222,7 @@ class ActualStateCapture:
                 ("torso", "left_arm", "right_arm", "left_gripper", "right_gripper", "odom")
             ),
             sampling_contract=np.asarray(
-                "Actual 23-D feedback sampled in the replay process immediately after each 20-Hz "
+                "Actual 23-D feedback sampled in the replay process immediately after each "
                 "publish; action is the exact [upper_state, base_twist] command sent for that replay frame."
             ),
         )
@@ -223,7 +234,7 @@ class ActualStateCapture:
                     "source_npz": str(self.source_path),
                     "output": str(self.output_path),
                     "sample_count": len(self.states),
-                    "rate_hz_requested": self.rate_hz,
+                    "nominal_replay_rate_hz": self.rate_hz,
                     "max_state_age_s": self.max_state_age_s,
                     "replay_source": self.replay_source,
                     "dropped_samples": self.dropped_samples,
@@ -237,6 +248,20 @@ class ActualStateCapture:
         return self.output_path, summary_path
 
 
+def parse_rate_hz(raw_value: str) -> float | None:
+    """Parse ``source`` or an explicit positive fixed replay frequency."""
+
+    if raw_value.lower() in {"source", "native", "auto"}:
+        return None
+    try:
+        rate_hz = float(raw_value)
+    except ValueError as exc:
+        raise argparse.ArgumentTypeError("must be 'source' or a positive number") from exc
+    if not math.isfinite(rate_hz) or rate_hz <= 0.0:
+        raise argparse.ArgumentTypeError("must be 'source' or a finite positive number")
+    return rate_hz
+
+
 def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(
         description=(
@@ -248,7 +273,10 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument(
         "--npz",
         default=DEFAULT_NPZ,
-        help="NPZ containing timestamp_s[N], state[N,23], and action[N,23].",
+        help=(
+            "Legacy NPZ: timestamp_s[N], state[N,23], action[N,23]. Native-clock NPZ: "
+            "state_timestamp_s[Ns], state[Ns,23], action_timestamp_s[Na], action[Na,23]."
+        ),
     )
     parser.add_argument(
         "--replay-source",
@@ -262,9 +290,13 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--cmd-topic", default=DEFAULT_CMD_TOPIC)
     parser.add_argument(
         "--rate-hz",
-        type=float,
-        default=20.0,
-        help="Deployment publish frequency; source states are timestamp-resampled to this rate.",
+        type=parse_rate_hz,
+        default="source",
+        metavar="{source|HZ}",
+        help=(
+            "source (default): preserve the selected state/action source timestamps; "
+            "a positive HZ value: explicitly resample onto a fixed publish clock."
+        ),
     )
     parser.add_argument(
         "--start-offset-s",
@@ -290,7 +322,7 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument(
         "--dry-run-realtime",
         action="store_true",
-        help="In --dry-run, keep 20 Hz wall-clock timing instead of printing a quick preview.",
+        help="In --dry-run, retain the selected source/fixed wall-clock timing instead of printing quickly.",
     )
     parser.add_argument(
         "--discovery-wait-s",
@@ -349,7 +381,7 @@ def parse_args() -> argparse.Namespace:
         "--record-actual-state",
         action="store_true",
         help=(
-            "During replay, record fresh live JointState + odom feedback at the same 20 Hz loop and "
+            "During replay, record fresh live JointState + odom feedback after each publish and "
             "save it to a separate NPZ with the exact 23-D command sent for every captured frame. "
             "Stale feedback rows are skipped; use replay_frame_index to align the result."
         ),
@@ -383,29 +415,68 @@ def load_source_state(raw_path: str) -> SourceState:
         raise FileNotFoundError(f"NPZ file does not exist: {path}")
 
     with np.load(path, allow_pickle=False) as archive:
-        missing = [name for name in ("timestamp_s", "state", "action") if name not in archive]
-        if missing:
-            raise ValueError(f"NPZ is missing required array(s): {', '.join(missing)}")
-        timestamps_s = np.asarray(archive["timestamp_s"], dtype=np.float64)
-        states = np.asarray(archive["state"], dtype=np.float64)
-        actions = np.asarray(archive["action"], dtype=np.float64)
+        native_required = ("state_timestamp_s", "state", "action_timestamp_s", "action")
+        if all(name in archive for name in native_required):
+            state_timestamps_s = np.asarray(archive["state_timestamp_s"], dtype=np.float64)
+            states = np.asarray(archive["state"], dtype=np.float64)
+            action_timestamps_s = np.asarray(archive["action_timestamp_s"], dtype=np.float64)
+            actions = np.asarray(archive["action"], dtype=np.float64)
+            state_base_twists = (
+                np.asarray(archive["state_base_twist"], dtype=np.float64)
+                if "state_base_twist" in archive
+                else None
+            )
+            native_timing_schema = True
+        else:
+            missing = [name for name in ("timestamp_s", "state", "action") if name not in archive]
+            if missing:
+                raise ValueError(
+                    "NPZ must contain either native-clock arrays "
+                    "(state_timestamp_s/state/action_timestamp_s/action) or legacy arrays "
+                    f"(timestamp_s/state/action); missing: {', '.join(missing)}"
+                )
+            legacy_timestamps_s = np.asarray(archive["timestamp_s"], dtype=np.float64)
+            state_timestamps_s = legacy_timestamps_s
+            action_timestamps_s = legacy_timestamps_s
+            states = np.asarray(archive["state"], dtype=np.float64)
+            actions = np.asarray(archive["action"], dtype=np.float64)
+            state_base_twists = None
+            native_timing_schema = False
 
-    if timestamps_s.ndim != 1:
-        raise ValueError(f"timestamp_s must have shape [N], got {timestamps_s.shape}")
-    if states.ndim != 2 or states.shape[1] != VECTOR_DIM:
-        raise ValueError(f"state must have shape [N,{VECTOR_DIM}], got {states.shape}")
-    if actions.ndim != 2 or actions.shape[1] != VECTOR_DIM:
-        raise ValueError(f"action must have shape [N,{VECTOR_DIM}], got {actions.shape}")
-    if len(timestamps_s) != len(states) or len(timestamps_s) != len(actions) or len(states) < 2:
-        raise ValueError(
-            "timestamp_s, state, and action must have the same length, with at least two frames: "
-            f"timestamps={len(timestamps_s)}, states={len(states)}, actions={len(actions)}"
-        )
-    if not np.isfinite(timestamps_s).all() or not np.isfinite(states).all() or not np.isfinite(actions).all():
-        raise ValueError("timestamp_s, state, and action must contain only finite values")
-    if np.any(np.diff(timestamps_s) <= 0.0):
-        raise ValueError("timestamp_s must be strictly increasing")
-    return SourceState(timestamps_s=timestamps_s, states=states, actions=actions, path=path)
+    def validate_stream(label: str, timestamps_s: np.ndarray, values: np.ndarray) -> None:
+        if timestamps_s.ndim != 1:
+            raise ValueError(f"{label}_timestamp_s must have shape [N], got {timestamps_s.shape}")
+        if values.ndim != 2 or values.shape[1] != VECTOR_DIM:
+            raise ValueError(f"{label} must have shape [N,{VECTOR_DIM}], got {values.shape}")
+        if len(timestamps_s) != len(values) or len(values) < 2:
+            raise ValueError(
+                f"{label}_timestamp_s and {label} must have the same length with at least two frames: "
+                f"timestamps={len(timestamps_s)}, values={len(values)}"
+            )
+        if not np.isfinite(timestamps_s).all() or not np.isfinite(values).all():
+            raise ValueError(f"{label}_timestamp_s and {label} must contain only finite values")
+        if np.any(np.diff(timestamps_s) <= 0.0):
+            raise ValueError(f"{label}_timestamp_s must be strictly increasing")
+
+    validate_stream("state", state_timestamps_s, states)
+    validate_stream("action", action_timestamps_s, actions)
+    if state_base_twists is not None:
+        if state_base_twists.shape != (len(state_timestamps_s), BASE_DIM):
+            raise ValueError(
+                "state_base_twist must have shape "
+                f"[{len(state_timestamps_s)},{BASE_DIM}], got {state_base_twists.shape}"
+            )
+        if not np.isfinite(state_base_twists).all():
+            raise ValueError("state_base_twist must contain only finite values")
+    return SourceState(
+        state_timestamps_s=state_timestamps_s,
+        states=states,
+        action_timestamps_s=action_timestamps_s,
+        actions=actions,
+        state_base_twists=state_base_twists,
+        path=path,
+        native_timing_schema=native_timing_schema,
+    )
 
 
 def resolve_actual_state_output(source: SourceState, args: argparse.Namespace) -> Path | None:
@@ -436,14 +507,14 @@ def resolve_actual_state_output(source: SourceState, args: argparse.Namespace) -
 
 def build_trajectory(
     source: SourceState,
-    rate_hz: float,
+    rate_hz: float | None,
     start_offset_s: float,
     duration_s: float | None,
     max_frames: int | None,
     replay_source: str,
 ) -> ReplayTrajectory:
-    if not math.isfinite(rate_hz) or rate_hz <= 0.0:
-        raise ValueError("--rate-hz must be finite and positive")
+    if rate_hz is not None and (not math.isfinite(rate_hz) or rate_hz <= 0.0):
+        raise ValueError("--rate-hz must be 'source' or a finite positive number")
     if not math.isfinite(start_offset_s) or start_offset_s < 0.0:
         raise ValueError("--start-offset-s must be finite and non-negative")
     if duration_s is not None and (not math.isfinite(duration_s) or duration_s <= 0.0):
@@ -453,8 +524,11 @@ def build_trajectory(
     if replay_source not in {"state", "action"}:
         raise ValueError(f"unsupported replay source: {replay_source!r}")
 
-    source_start_s = float(source.timestamps_s[0])
-    source_end_s = float(source.timestamps_s[-1])
+    selected_timestamps_s = (
+        source.state_timestamps_s if replay_source == "state" else source.action_timestamps_s
+    )
+    source_start_s = float(selected_timestamps_s[0])
+    source_end_s = float(selected_timestamps_s[-1])
     start_s = source_start_s + start_offset_s
     if start_s > source_end_s:
         raise ValueError("--start-offset-s is after the end of the NPZ")
@@ -462,31 +536,66 @@ def build_trajectory(
     if end_s < start_s:
         raise ValueError("no source time remains after applying start/duration")
 
-    # A regular 20 Hz target clock follows deployment. Round the end *up* to
-    # the next tick so the final source values are not silently omitted. State
-    # positions use linear resampling for legacy edited trajectories. A model
-    # action is a command rather than a measured pose, so it uses causal
-    # zero-order hold exactly like the base Twist: no command is invented
-    # between recorded deployment ticks.
-    frame_count = int(math.ceil((end_s - start_s) * rate_hz - 1e-9)) + 1
-    if max_frames is not None:
-        frame_count = min(frame_count, max_frames)
-    times_s = start_s + np.arange(frame_count, dtype=np.float64) / rate_hz
-    upper_states = np.empty((frame_count, UPPER_BODY_DIM), dtype=np.float64)
-    base_twists = np.empty((frame_count, BASE_DIM), dtype=np.float64)
-    base_indices = np.searchsorted(source.timestamps_s, times_s, side="right") - 1
-    base_indices = np.clip(base_indices, 0, len(source.timestamps_s) - 1)
-    if replay_source == "state":
-        for index in range(UPPER_BODY_DIM):
-            upper_states[:, index] = np.interp(times_s, source.timestamps_s, source.states[:, index])
+    if rate_hz is None:
+        selected_indices = np.flatnonzero(
+            (selected_timestamps_s >= start_s) & (selected_timestamps_s <= end_s)
+        )
+        if not len(selected_indices):
+            raise ValueError("no selected source samples remain after applying start/duration")
+        if max_frames is not None:
+            selected_indices = selected_indices[:max_frames]
+        times_s = selected_timestamps_s[selected_indices]
+        source_timing = True
+        nominal_rate_hz = 1.0 / float(np.median(np.diff(selected_timestamps_s)))
     else:
-        upper_states[:, :] = source.actions[base_indices, :UPPER_BODY_DIM]
-    base_twists[:, :] = source.actions[base_indices, UPPER_BODY_DIM:]
+        # Fixed-rate mode deliberately changes timing. It is retained for
+        # legacy deployments that explicitly want a regular command clock.
+        frame_count = int(math.floor((end_s - start_s) * rate_hz + 1e-9)) + 1
+        times_s = start_s + np.arange(frame_count, dtype=np.float64) / rate_hz
+        if times_s[-1] < end_s - 1e-9:
+            times_s = np.append(times_s, end_s)
+        if max_frames is not None:
+            times_s = times_s[:max_frames]
+        selected_indices = None
+        source_timing = False
+        nominal_rate_hz = rate_hz
+
+    if replay_source == "state":
+        if source_timing:
+            assert selected_indices is not None
+            upper_states = source.states[selected_indices, :UPPER_BODY_DIM]
+            if source.state_base_twists is not None:
+                base_twists = source.state_base_twists[selected_indices]
+            else:
+                base_indices = np.searchsorted(source.action_timestamps_s, times_s, side="right") - 1
+                base_indices = np.clip(base_indices, 0, len(source.actions) - 1)
+                base_twists = source.actions[base_indices, UPPER_BODY_DIM:]
+        else:
+            upper_states = np.empty((len(times_s), UPPER_BODY_DIM), dtype=np.float64)
+            for index in range(UPPER_BODY_DIM):
+                upper_states[:, index] = np.interp(
+                    times_s, source.state_timestamps_s, source.states[:, index]
+                )
+            if source.state_base_twists is not None:
+                base_indices = np.searchsorted(source.state_timestamps_s, times_s, side="right") - 1
+                base_indices = np.clip(base_indices, 0, len(source.state_base_twists) - 1)
+                base_twists = source.state_base_twists[base_indices]
+            else:
+                base_indices = np.searchsorted(source.action_timestamps_s, times_s, side="right") - 1
+                base_indices = np.clip(base_indices, 0, len(source.actions) - 1)
+                base_twists = source.actions[base_indices, UPPER_BODY_DIM:]
+    else:
+        action_indices = np.searchsorted(source.action_timestamps_s, times_s, side="right") - 1
+        action_indices = np.clip(action_indices, 0, len(source.actions) - 1)
+        upper_states = source.actions[action_indices, :UPPER_BODY_DIM]
+        base_twists = source.actions[action_indices, UPPER_BODY_DIM:]
     return ReplayTrajectory(
         times_s=times_s,
+        schedule_times_s=times_s.copy(),
         upper_states=upper_states,
         base_twists=base_twists,
-        rate_hz=rate_hz,
+        rate_hz=nominal_rate_hz,
+        source_timing=source_timing,
     )
 
 
@@ -497,10 +606,11 @@ def add_large_jump_transitions(
 ) -> ReplayTrajectory:
     """Optionally insert ramps at large *upper-body* discontinuities.
 
-    The default transition duration is zero, so normal use sends the resampled
-    state faithfully.  When requested, inserted frames lengthen replay by the
-    requested duration per discontinuity rather than hiding a jump inside one
-    20 Hz command period.
+    The default transition duration is zero, so normal use preserves the
+    selected source. When requested in explicit fixed-rate mode, inserted
+    frames lengthen wall-clock replay rather than hiding a jump inside one
+    command period. Native source-timing mode refuses this deliberate timing
+    modification.
     """
 
     if not math.isfinite(transition_s) or transition_s < 0.0:
@@ -509,11 +619,17 @@ def add_large_jump_transitions(
         raise ValueError("--transition-threshold-rad must be finite and positive")
     if transition_s == 0.0 or len(trajectory.upper_states) < 2:
         return trajectory
+    if trajectory.source_timing:
+        raise ValueError(
+            "--transition-s changes source timing; pass an explicit --rate-hz HZ to use it"
+        )
 
     transition_steps = max(1, int(math.ceil(transition_s * trajectory.rate_hz)))
     output_upper_states: list[np.ndarray] = [trajectory.upper_states[0]]
     output_base_twists: list[np.ndarray] = [trajectory.base_twists[0]]
     output_times: list[float] = [float(trajectory.times_s[0])]
+    output_schedule_times: list[float] = [float(trajectory.schedule_times_s[0])]
+    schedule_offset_s = 0.0
     for index in range(1, len(trajectory.upper_states)):
         previous_upper = output_upper_states[-1]
         previous_base = output_base_twists[-1]
@@ -528,15 +644,20 @@ def add_large_jump_transitions(
                 output_upper_states.append(ramped_upper)
                 output_base_twists.append(target_base if fraction == 1.0 else previous_base)
                 output_times.append(float(trajectory.times_s[index]))
+                output_schedule_times.append(output_schedule_times[-1] + 1.0 / trajectory.rate_hz)
+            schedule_offset_s += (transition_steps - 1) / trajectory.rate_hz
         else:
             output_upper_states.append(target_upper)
             output_base_twists.append(target_base)
             output_times.append(float(trajectory.times_s[index]))
+            output_schedule_times.append(float(trajectory.schedule_times_s[index]) + schedule_offset_s)
     return ReplayTrajectory(
         times_s=np.asarray(output_times, dtype=np.float64),
+        schedule_times_s=np.asarray(output_schedule_times, dtype=np.float64),
         upper_states=np.asarray(output_upper_states, dtype=np.float64),
         base_twists=np.asarray(output_base_twists, dtype=np.float64),
         rate_hz=trajectory.rate_hz,
+        source_timing=False,
     )
 
 
@@ -553,6 +674,14 @@ def zero_arm_plateaus(
         for start, end in edges.reshape(-1, 2)
         if end - start >= minimum_frames
     ]
+
+
+def source_values_and_timestamps(
+    source: SourceState, replay_source: str
+) -> tuple[np.ndarray, np.ndarray]:
+    if replay_source == "state":
+        return source.states, source.state_timestamps_s
+    return source.actions, source.action_timestamps_s
 
 
 def max_upper_body_step(trajectory: ReplayTrajectory) -> tuple[int, float]:
@@ -576,29 +705,36 @@ def format_command(upper_state: Sequence[float], base_twist: Sequence[float]) ->
 
 
 def print_source_summary(source: SourceState, trajectory: ReplayTrajectory, args: argparse.Namespace) -> None:
-    native_dt_s = np.diff(source.timestamps_s)
-    native_rate_hz = 1.0 / float(np.median(native_dt_s))
-    command_layout = (
-        "[1.0, state[0:20], action[20:23]]"
-        if args.replay_source == "state"
-        else "[1.0, action[0:23]]"
-    )
+    state_dt_s = np.diff(source.state_timestamps_s)
+    action_dt_s = np.diff(source.action_timestamps_s)
+    state_rate_hz = 1.0 / float(np.median(state_dt_s))
+    action_rate_hz = 1.0 / float(np.median(action_dt_s))
+    if args.replay_source == "state":
+        base_label = "state_base_twist" if source.state_base_twists is not None else "action[20:23]"
+        command_layout = f"[1.0, state[0:20], {base_label}]"
+    else:
+        command_layout = "[1.0, action[0:23]]"
     print(
         f"[load] npz={source.path}\n"
-        f"[load] state={source.states.shape}, action={source.actions.shape}, source_duration="
-        f"{source.timestamps_s[-1] - source.timestamps_s[0]:.3f}s, native_rate≈{native_rate_hz:.3f}Hz\n"
-        f"[ready] output_frames={len(trajectory.upper_states)}, rate={trajectory.rate_hz:g}Hz, "
-        f"output_duration={(len(trajectory.upper_states) - 1) / trajectory.rate_hz:.3f}s\n"
+        f"[load] state={source.states.shape}, duration="
+        f"{source.state_timestamps_s[-1] - source.state_timestamps_s[0]:.3f}s, "
+        f"native_rate≈{state_rate_hz:.3f}Hz; action={source.actions.shape}, duration="
+        f"{source.action_timestamps_s[-1] - source.action_timestamps_s[0]:.3f}s, "
+        f"native_rate≈{action_rate_hz:.3f}Hz\n"
+        f"[ready] timing={'source timestamps' if trajectory.source_timing else 'fixed-rate resample'}, "
+        f"output_frames={len(trajectory.upper_states)}, nominal_rate≈{trajectory.rate_hz:g}Hz, "
+        f"output_duration={trajectory.schedule_times_s[-1] - trajectory.schedule_times_s[0]:.3f}s\n"
         f"[ready] replay_source={args.replay_source}; Float64MultiArray={command_layout}\n"
         f"[ready] cmd_topic={args.cmd_topic}",
         flush=True,
     )
     source_label = "state" if args.replay_source == "state" else "action"
+    _, source_times_s = source_values_and_timestamps(source, args.replay_source)
     for start, end in zero_arm_plateaus(source, args.replay_source):
         print(
             f"[warning] {source_label} itself has an all-zero arm/gripper stretch: "
-            f"frames {start}:{end - 1}, source_time={source.timestamps_s[start]:.3f}.."
-            f"{source.timestamps_s[end - 1]:.3f}s. It will be replayed as supplied.",
+            f"frames {start}:{end - 1}, source_time={source_times_s[start]:.3f}.."
+            f"{source_times_s[end - 1]:.3f}s. It will be replayed as supplied.",
             flush=True,
         )
     jump_index, jump_rad = max_upper_body_step(trajectory)
@@ -610,9 +746,11 @@ def print_source_summary(source: SourceState, trajectory: ReplayTrajectory, args
             flush=True,
         )
     if args.replay_source == "state":
+        base_source = "state_base_twist" if source.state_base_twists is not None else "action[20:23]"
         print(
-            "[note] upper body uses state[0:20]; the final base command slots use action[20:23] "
-            "from recorded Twist. state[20:23] odometry velocities are not published as commands.",
+            "[note] upper body uses state[0:20]; the final base command slots use "
+            f"{base_source} from recorded Twist. state[20:23] odometry velocities are not "
+            "published as commands.",
             flush=True,
         )
     else:
@@ -793,7 +931,7 @@ def drain_callbacks(rclpy_module: Any, node: Any, max_callbacks: int = 32) -> No
 
     The normal replay path deliberately does not need a continuously spinning
     executor.  When capture is requested, this bounded non-blocking drain
-    prevents the five fast JointState streams from sitting behind the 20 Hz
+    prevents the five fast JointState streams from sitting behind the replay
     publish loop while leaving the control schedule unchanged.  The remaining
     wait time is then spent in ``spin_for`` below.
     """
@@ -871,7 +1009,6 @@ def replay(
     actual_state_capture: ActualStateCapture | None = None,
 ) -> None:
     realtime = not args.dry_run or args.dry_run_realtime
-    period_s = 1.0 / trajectory.rate_hz
     rclpy_module: Any | None = None
     node: Any | None = None
     completed = False
@@ -894,7 +1031,7 @@ def replay(
                 else:
                     # Keep the state queues current before snapshotting. This
                     # is capture-only and is compensated by the same absolute
-                    # 20 Hz deadline below.
+                    # source/fixed timing deadline below.
                     drain_callbacks(rclpy_module, node)
                     measured_state, cache_ages_s, reason = node.current_actual_state(
                         actual_state_capture.max_state_age_s
@@ -928,13 +1065,14 @@ def replay(
                 )
 
             if realtime and index + 1 < len(trajectory.upper_states):
-                deadline_s = start_wall_s + (index + 1) * period_s
+                deadline_s = start_wall_s + (
+                    trajectory.schedule_times_s[index + 1] - trajectory.schedule_times_s[0]
+                )
                 remaining_s = max(0.0, deadline_s - time.perf_counter())
                 if actual_state_capture is not None and node is not None:
                     # Unlike plain replay, consume feedback throughout the
                     # idle portion of the period so the next sample remains
-                    # fresh even though all state streams publish faster than
-                    # 20 Hz.
+                    # fresh even when commands publish faster than feedback.
                     spin_for(rclpy_module, node, remaining_s)
                 else:
                     time.sleep(remaining_s)
@@ -999,7 +1137,7 @@ def main() -> None:
     if inserted_frame_count:
         print(
             f"[ready] --transition-s inserted {inserted_frame_count} linear ramp frame(s); "
-            f"wall-clock replay is {inserted_frame_count / trajectory.rate_hz:.3f}s longer.",
+            f"wall-clock replay is {trajectory.schedule_times_s[-1] - trajectory.times_s[-1]:.3f}s longer.",
             flush=True,
         )
     actual_state_capture = None

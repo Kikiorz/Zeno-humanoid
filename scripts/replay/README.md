@@ -1,7 +1,7 @@
 # Zeno NPZ Replay
 
-`replay_zeno_npz_state.py` replays an existing Zeno trajectory through the
-normal deployment command topic.  It publishes at 20 Hz:
+`replay_zeno_npz_state.py` sends an existing Zeno trajectory through the
+normal deployment command topic:
 
 ```text
 /zeno/h1/auto/wholebody/cmd
@@ -9,17 +9,45 @@ std_msgs/msg/Float64MultiArray
 [1.0, upper_body_20, base_twist_3]
 ```
 
-It is a ROS2 command tool.  Use it only after the robot controller and all
+It is a ROS2 command tool. Use it only after the robot controller and all
 state topics are running.
 
-## Input NPZ contract
+## Timing
 
-The input needs these arrays:
+The default is `--rate-hz source`: it publishes on the original timestamps of
+the selected input stream rather than forcing 20 Hz.
+
+- `--replay-source state` follows the native `state` timestamps. For the
+  current bag conversion this is approximately 100 Hz.
+- `--replay-source action` follows the native `action` timestamps. For the
+  current bag conversion this is approximately 300 Hz.
+- `--rate-hz 20` (or another positive value) deliberately resamples onto a
+  fixed-rate clock. Use this only when a controller needs that behavior.
+
+The scheduler uses the actual timestamp intervals, not merely their median
+frequency. This preserves timing jitter and any nonuniform intervals from the
+recording.
+
+## Input NPZ contracts
+
+The older, shared-clock format remains supported:
 
 ```text
 timestamp_s  float64 [N]
 state        float32/float64 [N, 23]
 action       float32/float64 [N, 23]
+```
+
+The new native-clock format is used by
+`scripts/data_convert/convert_zeno_bag_to_replay_npz.py` and preserves the
+two source rates independently:
+
+```text
+state_timestamp_s  float64 [Ns]
+state              float32 [Ns, 23]
+state_base_twist   float32 [Ns, 3]  # recorded twist/cmd, causal-aligned
+action_timestamp_s float64 [Na]
+action             float32 [Na, 23]
 ```
 
 The 23-D order is:
@@ -31,92 +59,86 @@ left_gripper, right_gripper,
 base_vx, base_vy, base_rotation
 ```
 
-In the default `--replay-source state` mode, replay publishes
-`state[:20]` for the upper body and `action[20:23]` for the base.  Therefore
-the upper body follows the recorded feedback pose, while the base follows the
-recorded `/zeno/h1/twist/cmd` tail.  Measured `state[20:23]` odometry velocity
-is never sent as a command.
+In the default `--replay-source state` mode, the upper body comes from
+`state[:20]`, while the base command comes from `state_base_twist` when it is
+available (otherwise causal `action[20:23]`, for compatibility). Measured
+`state[20:23]` odometry velocity is never sent as a command.
 
-Use `--replay-source action` only for a model-output NPZ, where every 23-D
-action value is a command target.
+`--replay-source action` sends the full `action[:23]` command and is the
+correct mode for a model-output NPZ.
 
 ## Replay normally
 
-First preview without publishing:
+Preview without publishing:
 
 ```bash
 source /opt/ros/humble/setup.bash
 /usr/bin/python3 scripts/replay/replay_zeno_npz_state.py \
-  --npz /path/to/trajectory.npz \
+  --npz /path/to/trajectory_native.npz \
+  --replay-source state \
   --dry-run
 ```
 
-Then replay on the robot (publishing is the default):
+Replay the original native state timing on the robot (publishing is the
+default):
 
 ```bash
 source /opt/ros/humble/setup.bash
 /usr/bin/python3 scripts/replay/replay_zeno_npz_state.py \
-  --npz /path/to/trajectory.npz
+  --npz /path/to/trajectory_native.npz \
+  --replay-source state
+```
+
+To intentionally use fixed 20 Hz:
+
+```bash
+/usr/bin/python3 scripts/replay/replay_zeno_npz_state.py \
+  --npz /path/to/trajectory_native.npz \
+  --replay-source state \
+  --rate-hz 20
 ```
 
 Before the first command, the script waits for a real controller subscriber
-and compares the live 20-D joint state to the first target.  It refuses to
+and compares the live 20-D joint state to the first target. It refuses to
 start if the largest error exceeds `0.20` unless explicitly overridden with
-`--allow-unchecked-start`.  It sends three all-zero idle commands on normal
+`--allow-unchecked-start`. It sends three all-zero idle commands on normal
 exit or interruption.
+
+`--transition-s` intentionally changes timing by inserting upper-body ramp
+frames. It is therefore rejected in default source-timing mode; give an
+explicit `--rate-hz` when using it.
 
 ## Replay and record the real robot state
 
-Add `--record-actual-state` to one replay command.  This never changes or
-overwrites the input NPZ.  It creates a **new** NPZ after replay finishes:
+Add `--record-actual-state` to a real replay run. The input NPZ is never
+changed; a new capture NPZ is written after replay finishes:
 
 ```bash
 source /opt/ros/humble/setup.bash
 /usr/bin/python3 scripts/replay/replay_zeno_npz_state.py \
-  --npz /path/to/trajectory.npz \
+  --npz /path/to/trajectory_native.npz \
   --record-actual-state \
   --actual-state-output /home/zeno-rp/2027icra/Data/replay/trajectory_actual_state.npz
 ```
 
-The capture shares the replay process and the same 20 Hz loop, so it does not
-add an extra subscriber to the auto-command topic or affect replay's
-subscriber preflight.  Each fresh capture row contains:
+Each fresh capture row contains:
 
 ```text
 timestamp_s           capture time relative to replay start
 state [N, 23]         actual live joint feedback + measured odom velocity
-action [N, 23]        exact target sent by replay at that frame (no leading mode 1.0)
-source_timestamp_s    input NPZ time of the command
+action [N, 23]        exact target sent by replay (no leading mode 1.0)
+source_timestamp_s    input NPZ time of that command
 replay_frame_index    replay frame index for alignment
-state_cache_age_s     age of torso, left arm, right arm, left gripper,
-                      right gripper, and odom caches
+state_cache_age_s     age of torso, arms, grippers, and odom caches
 ```
 
-State caches must be fresh (default maximum age `0.25` s).  If a state topic
-is missing or stale, that row is skipped rather than mixing an old feedback
-value with a new target.  Check the adjacent JSON summary for skipped-row
-counts.  A capture can therefore contain fewer rows than replay frames; align
-by `replay_frame_index`, not merely array position.
+State caches must be fresh (default maximum age `0.25` s). If a state topic
+is missing or stale, that row is skipped. At action replay's roughly 300 Hz,
+the captured feedback may repeat a most-recent 100 Hz JointState; that is
+expected and is visible in the cache ages. Align by `replay_frame_index`, not
+only array position.
 
-`--record-actual-state` requires a real publishing run and intentionally
-rejects `--dry-run`.  The script refuses an output path equal to the input
-NPZ; use `--overwrite-actual-state` only to replace a previous capture file.
-
-## Useful safety options
-
-```bash
-# Insert 0.5 seconds of linear upper-body ramp only for a step > 0.30 rad.
-# This changes replay timing deliberately.
---transition-s 0.5 --transition-threshold-rad 0.30
-
-# Tighten the initial live-state vs first-command check.
---start-max-position-error 0.10
-
-# Require more recent feedback for capture rows.
---actual-state-max-age-s 0.10
-```
-
-The replay script has an initial-pose check and safe idle on exit, but it does
-not impose per-joint hardware limits, velocity limits, or a mid-run tracking
-error stop.  Hardware-side limits and tracking protection remain active; use
-the captured actual-state NPZ to diagnose whether a target was reached.
+The replay script provides initial-pose checking and safe idle on exit. It
+does not impose per-joint hardware limits, velocity limits, or a mid-run
+tracking-error stop; hardware-side limits and tracking protection remain
+active.
