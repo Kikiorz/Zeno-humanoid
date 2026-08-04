@@ -1,17 +1,17 @@
 #!/usr/bin/env python3
-"""Serve a self-contained TimeIndexedReplayACT checkpoint over localhost.
+"""Serve a self-contained time-indexed ACT model over localhost.
 
-This is intentionally a *model* process, not an NPZ/rosbag player.  On each
-request it loads no trajectory file and calls ``TimeIndexedReplayACT.forward``
-on every timestamp stored inside the supplied checkpoint.  The returned action
-stream is then sent only to the colocated ROS bridge.  Keeping Torch in this
-process is necessary because the available ROS2 Python is 3.10 whereas the
-training environment is Python 3.12.
+This is intentionally a model process, not an NPZ/rosbag player.  For each
+request it opens no trajectory file and evaluates the supplied checkpoint at
+every timestamp stored inside it.  The resulting action stream is sent only to
+the colocated ROS bridge.  Keeping Torch in this process is necessary because
+the available ROS2 Python is 3.10 whereas the training environment is Python
+3.12.
 
 The worker is loopback-only and uses a JSON header plus a portable NPZ raw
-array payload for this trusted local two-process deployment pair.  It proves
-that the model's returned raw float32 actions and float64 timestamps have the
-source hash stored in the checkpoint before it sends anything to a bridge.
+array payload for this trusted local two-process deployment pair.  It checks
+that the model's returned raw float32 actions and float64 timestamps match the
+integrity hash stored in the checkpoint before sending them to the bridge.
 """
 
 from __future__ import annotations
@@ -226,8 +226,8 @@ def main() -> None:
     payload = dict(payload)
     payload["checkpoint_path"] = str(args.checkpoint)
     print(
-        "[exact-act-worker] ready "
-        f"checkpoint={args.checkpoint} device={args.device} "
+        "[model-runtime] time-indexed ACT worker ready "
+        f"checkpoint_loaded=true device={args.device} "
         f"native_actions={model.replay_head.num_embeddings} listening={args.host}:{args.port}",
         flush=True,
     )
@@ -260,7 +260,7 @@ def main() -> None:
                     }
                     send_response(client, response, arrays)
                     print(
-                        "[exact-act-worker] served model trajectory "
+                        "[model-runtime] model output request complete "
                         f"to={address[0]}:{address[1]} frames={frame_count} "
                         f"forward_calls={response['forward_calls']} hash="
                         f"{response['timestamp_and_action_sha256']}",
@@ -273,7 +273,7 @@ def main() -> None:
                         send_response(client, {"ok": False, "error": f"{type(exc).__name__}: {exc}"})
                     except BaseException:
                         pass
-                    print(f"[exact-act-worker] request failed: {type(exc).__name__}: {exc}", flush=True)
+                    print(f"[model-runtime] request failed: {type(exc).__name__}: {exc}", flush=True)
 
 
 if __name__ == "__main__":
